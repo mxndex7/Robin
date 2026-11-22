@@ -1,0 +1,8 @@
+# Dependências do app, com versões fixas. httpx, bottle e pythonnet são importados diretamente
+# (timeouts do Gemini, no-cache da interface, moldura da janela), além de chegarem por dependência.
+pywebview==6.2.1
+google-genai==2.33.0
+python-dotenv==1.2.4
+httpx==0.28.1
+bottle==0.13.4
+pythonnet==3.2.1

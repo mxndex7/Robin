@@ -1,0 +1,2 @@
+# O cmd lê .bat com fim de linha LF de forma errada (rótulos e call :rótulo se perdem).
+*.bat text eol=crlf

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Build (PyInstaller)
+build/
+dist/
+
+# Segredos e dados pessoais (a pasta de dados fica em %APPDATA%\Robin)
+.env
+.env.*
+/memory.md
+
+# Sistema / editor
+Thumbs.db
+desktop.ini
+.vscode/
+
+# Dados do Robin, se a pasta de dados apontar para cá (ROBIN_DATA_DIR)
+brain*.json
+sync*.json
+conversas/
+*.lixeira.json
+instancia.json
+*.log
+/mock/

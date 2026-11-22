@@ -1,0 +1,183 @@
+/* Animações em CSS (entradas, "pensando", cursor, spinner) e o movimento reduzido. Só transform e
+   opacity. As coreografias com Web Animations (abertura, lateral, popovers, toasts, limpar) ficam
+   nos módulos JS e leem os mesmos tokens de duração e curva (overlay.js: motion). */
+
+/* Mensagens sobem um pouco ao entrar; a do Robin logo depois da sua. */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(var(--rise));
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.message--user,
+.message--error,
+.message--note {
+  animation: rise var(--dur-2) var(--ease-out) both;
+}
+
+.message--assistant {
+  animation: rise var(--dur-2) var(--ease-out) var(--stagger) both;
+}
+
+/* Linha de ação do cérebro. */
+.tool-line {
+  animation: rise var(--dur-2) var(--ease-out) both;
+}
+
+/* Pensando: os três traços de brasa acendem em sequência, como o traço do R. */
+@keyframes ember {
+  0%,
+  100% {
+    opacity: 0.22;
+  }
+  40% {
+    opacity: 1;
+  }
+}
+
+.embers i {
+  animation: ember var(--dur-loop) var(--ease-in-out) infinite;
+}
+
+.embers i:nth-child(2) {
+  animation-delay: calc(var(--dur-loop) / 6);
+}
+
+.embers i:nth-child(3) {
+  animation-delay: calc(var(--dur-loop) / 3);
+}
+
+/* Os traços param quando a resposta começa (o indicador está saindo em fade). */
+.message--assistant:not(.is-thinking) .embers i {
+  animation-play-state: paused;
+}
+
+/* O R da barra de título pulsa enquanto o Robin gera. */
+@keyframes mark-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.brand__mark[data-state="thinking"] {
+  animation: mark-pulse calc(var(--dur-loop) * 1.6) var(--ease-in-out) infinite;
+}
+
+/* Corpo da resposta aparece em fade quando chega o primeiro pedaço; cada trecho novo também. */
+.message--assistant:not(.is-thinking) .message__body,
+.chunk {
+  animation: fade-in var(--dur-2) var(--ease-out) both;
+}
+
+/* Cursor do streaming piscando. */
+@keyframes caret-blink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  51%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.caret {
+  animation: caret-blink var(--dur-blink) steps(1, end) infinite;
+}
+
+/* Spinner do botão Salvar. */
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spinner {
+  animation: spin var(--dur-spin) linear infinite;
+}
+
+/* "Detalhes" do card de erro e o aviso de falha ao ler o memory.md entram em fade. */
+.error-card__more[open] .error-card__raw,
+.editor__error {
+  animation: fade-in var(--dur-2) var(--ease-out) both;
+}
+
+/* ---------- Movimento reduzido: sem deslocamentos, escalas nem laços; só fades curtos ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .brand__mark[data-state="thinking"],
+  .caret {
+    animation: none;
+  }
+
+  /* Os traços ficam parados, em degradê. */
+  .embers i {
+    animation: none;
+    opacity: 1;
+  }
+
+  .embers i:nth-child(2) {
+    opacity: 0.6;
+  }
+
+  .embers i:nth-child(3) {
+    opacity: 0.3;
+  }
+
+  .message--user,
+  .message--error,
+  .message--note,
+  .message--assistant,
+  .tool-line {
+    animation: fade-in var(--dur-1) linear both;
+  }
+
+  .spinner {
+    animation-duration: calc(var(--dur-spin) * 2);
+  }
+
+  .btn:active:not(:disabled),
+  .icon-btn:active,
+  .send-btn:active:not(:disabled),
+  .suggestion:active {
+    transform: none;
+  }
+
+  /* As trocas viram fades: sem rotação, escala ou deslize. */
+  .save-btn__state,
+  .send-btn__icon--stop,
+  .send-btn.is-stop .send-btn__icon--send,
+  .copy-btn__check,
+  .copy-btn.is-copied .copy-btn__copy,
+  .scroll-bottom {
+    transform: none;
+  }
+
+  /* O ícone do tema troca só em fade, sem girar. */
+  .theme-toggle > .icon {
+    transition: opacity var(--dur-1) linear;
+  }
+
+  .dirty-dot {
+    transform: skewX(var(--slant));
+  }
+
+  .model-trigger .icon,
+  .error-card__summary .icon,
+  .switch__thumb,
+  .sidebar__tab::after,
+  .suggestion::before {
+    transition-duration: 1ms;
+  }
+}
