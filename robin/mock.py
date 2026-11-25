@@ -40,6 +40,7 @@ from google.genai import errors, types
 from . import cloud_mock
 from .brain import normalize
 from .config import EMBEDDING_DIMENSIONS, FALLBACK_MODEL, FALLBACK_MODELS
+from .attachments import ATTACHMENT_MARKER
 from .gemini import GeminiService, _content_parts, _is_user_message
 
 THINKING_SECONDS = 0.8
@@ -464,7 +465,8 @@ class _SimulatedNetwork:
     def generate_content_stream(self, model: str, contents, config=None) -> Iterator[types.GenerateContentResponse]:
         global _embed_fail_until
         contents = list(contents)
-        user_texts = [_content_parts(content.parts or [])[0] for content in contents if _is_user_message(content)]
+        user_texts = [_content_parts(content.parts or [])[0].partition(ATTACHMENT_MARKER)[0]
+                      for content in contents if _is_user_message(content)]
         prompt = user_texts[-1] if user_texts else ""
         key = _normalize(prompt)
         name = model.removeprefix("models/")

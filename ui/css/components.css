@@ -1456,6 +1456,37 @@
   border-color: var(--accent);
 }
 
+.file-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: 0;
+  list-style: none;
+}
+
+.composer__attachments,
+.message__attachments {
+  margin: 0 0 var(--space-2);
+}
+
+.file-chip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  max-width: 100%;
+  padding: var(--space-1) var(--space-2);
+  border: var(--line) solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: var(--text-xs);
+}
+
+.file-chip__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Cresce com o texto até ~8 linhas (composer.js mede; sem animação de altura). */
 .composer__input {
   display: block;

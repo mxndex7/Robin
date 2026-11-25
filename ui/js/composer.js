@@ -1,15 +1,122 @@
 // Composer: textarea que cresce até ~8 linhas, Enter envia, Shift+Enter quebra linha,
 // contador discreto em textos longos e botão enviar que vira "parar" durante a geração.
 
+import { icon } from "./icons.js";
+import { toast } from "./toast.js";
+
 const COUNT_FROM = 500;
 
-export function createComposer({ onSubmit, onStop }) {
+export function createComposer({ onSubmit, onStop, limits }) {
   const form = document.getElementById("composer");
   const input = document.getElementById("composer-input");
   const button = document.getElementById("send-button");
   const count = document.getElementById("composer-count");
 
+  const fileInput = document.getElementById("composer-file-input");
+  const attachButton = document.getElementById("attach-button");
+  const attachmentList = document.getElementById("composer-attachments");
+  // A opção "Todos os arquivos" do seletor permite escolher Dockerfile, Makefile e outros nomes sem extensão.
+  if (limits) fileInput.accept = limits.extensions.join(",");
+  attachButton.hidden = !limits;
+
   let generating = false;
+  let reading = false;
+  let selection = 0;
+  let attachments = [];
+  let context = limits?.context;
+  let pickerContext = null;
+
+  function renderAttachments() {
+    attachmentList.hidden = !attachments.length;
+    attachmentList.replaceChildren(...attachments.map((file, index) => {
+      const chip = document.createElement("li");
+      chip.className = "file-chip";
+      const name = document.createElement("span");
+      name.className = "file-chip__name";
+      name.textContent = name.title = file.name;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "icon-btn icon-btn--sm";
+      remove.setAttribute("aria-label", `Remover ${file.name}`);
+      remove.append(icon("x", "icon icon--sm"));
+      remove.addEventListener("click", () => {
+        attachments = attachments.filter((_, i) => i !== index);
+        renderAttachments();
+        update();
+        input.focus();
+      });
+      chip.append(name, remove);
+      return chip;
+    }));
+  }
+
+  function clearFiles() {
+    selection += 1;
+    reading = false;
+    attachments = [];
+    fileInput.value = "";
+    renderAttachments();
+    update();
+  }
+
+  attachButton.addEventListener("click", () => {
+    pickerContext = context;
+    fileInput.click();
+  });
+  fileInput.addEventListener("cancel", () => {
+    pickerContext = null;
+  });
+  fileInput.addEventListener("change", async () => {
+    const chosenFor = pickerContext;
+    pickerContext = null;
+    const files = [...fileInput.files];
+    fileInput.value = "";
+    if (!limits || reading || generating || !files.length) return;
+    if (chosenFor && chosenFor !== context) {
+      toast("A conversa ou o provedor mudou. Selecione os arquivos novamente.");
+      return;
+    }
+    const ticket = ++selection;
+    reading = true;
+    update();
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    try {
+      for (const file of files) {
+        const lower = file.name.toLowerCase();
+        if (attachments.length >= limits.max_files) {
+          toast(`Selecione até ${limits.max_files} anexos por mensagem.`, { tone: "error" });
+          break;
+        }
+        if (!limits.basenames.includes(lower) && !limits.extensions.some((ext) => lower.endsWith(ext))) {
+          toast(`${file.name}: selecione um arquivo de texto, código ou log.`, { tone: "error" });
+          continue;
+        }
+        if (file.size > limits.max_file_bytes) {
+          toast(`${file.name}: cada arquivo pode ter até ${limits.max_file_bytes / 1024} KB.`, { tone: "error" });
+          continue;
+        }
+        if (attachments.reduce((total, item) => total + item.size, file.size) > limits.max_total_bytes) {
+          toast(`Os arquivos podem somar até ${limits.max_total_bytes / 1024} KB.`, { tone: "error" });
+          continue;
+        }
+        try {
+          const content = decoder.decode(await file.arrayBuffer());
+          if (ticket !== selection) return;
+          if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(content)) throw new Error("binary");
+          attachments.push({ name: file.name, size: file.size, content });
+        } catch {
+          if (ticket !== selection) return;
+          toast(`${file.name}: use um arquivo de texto em UTF-8.`, { tone: "error" });
+        }
+      }
+    } finally {
+      if (ticket === selection) {
+        reading = false;
+        renderAttachments();
+        update();
+      }
+    }
+  });
 
   // Cresce e encolhe com o texto, sem animar a altura (só transform e opacity animam). O teto de
   // ~8 linhas é o max-height do CSS; acima dele, o campo rola.
@@ -20,7 +127,8 @@ export function createComposer({ onSubmit, onStop }) {
 
   function update() {
     const length = input.value.length;
-    button.disabled = !generating && input.value.trim() === "";
+    button.disabled = !generating && (reading || (!attachments.length && input.value.trim() === ""));
+    attachButton.disabled = reading || generating;
     count.hidden = length < COUNT_FROM;
     count.textContent = `${length.toLocaleString("pt-BR")} caracteres`;
   }
@@ -31,8 +139,8 @@ export function createComposer({ onSubmit, onStop }) {
       return;
     }
     const text = input.value.trim();
-    if (!text) return;
-    onSubmit?.(text);
+    if (reading || (!text && !attachments.length)) return;
+    onSubmit?.(text, [...attachments], context);
   }
 
   input.addEventListener("input", () => {
@@ -68,7 +176,24 @@ export function createComposer({ onSubmit, onStop }) {
     clear() {
       input.value = "";
       autosize();
+      clearFiles();
+    },
+    clearFiles,
+    setAttachmentContext(next) {
+      if (!next || next === context) return;
+      context = next;
+      if (attachments.length || reading) {
+        clearFiles();
+        toast("A conversa ou o provedor mudou. Selecione os arquivos novamente.");
+      }
+    },
+    restoreDraft(text, files, previousContext) {
+      input.value = input.value ? [text, input.value].filter(Boolean).join("\n\n") : text;
+      if (previousContext === context) attachments = [...files];
+      renderAttachments();
+      autosize();
       update();
+      input.focus();
     },
     setGenerating(value) {
       generating = value;

@@ -64,6 +64,7 @@
         <symbol id="i-message" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></symbol>
         <symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></symbol>
         <symbol id="i-git-branch" viewBox="0 0 24 24"><path d="M6 3v12" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 0 1-9 9" /></symbol>
+        <symbol id="i-paperclip" viewBox="0 0 24 24"><path d="m21.4 11.6-8.9 8.9a5.7 5.7 0 0 1-8-8l9.6-9.6a3.8 3.8 0 0 1 5.4 5.4l-9.6 9.6a1.9 1.9 0 0 1-2.7-2.7L16 6.4" /></symbol>
         <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14" /><path d="M12 5v14" /></symbol>
         <symbol id="i-square-pen" viewBox="0 0 24 24"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z" /></symbol>
         <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" /><path d="M12 2v2" /><path d="M12 20v2" /><path d="m4.93 4.93 1.41 1.41" /><path d="m17.66 17.66 1.41 1.41" /><path d="M2 12h2" /><path d="M20 12h2" /><path d="m6.34 17.66-1.41 1.41" /><path d="m19.07 4.93-1.41 1.41" /></symbol>
@@ -246,8 +247,8 @@
               <div class="key-notice" id="key-notice" hidden>
                 <span class="key-notice__icon"><svg class="icon"><use href="#i-key" /></svg></span>
                 <div class="key-notice__text">
-                  <p class="key-notice__title">Configure sua API Key do Gemini</p>
-                  <p class="key-notice__desc">A chave fica só no <span class="mono">.env</span> da pasta de dados.</p>
+                  <p class="key-notice__title">Conecte um provedor de IA</p>
+                  <p class="key-notice__desc">Entre com o ChatGPT ou configure a chave da API do Gemini.</p>
                 </div>
                 <button class="btn btn--secondary btn--sm" id="key-notice-button">Configurar</button>
               </div>
@@ -283,8 +284,13 @@
             <svg class="icon"><use href="#i-arrow-down" /></svg>
           </button>
           <form class="composer" id="composer" autocomplete="off">
+            <ul class="composer__attachments file-chips" id="composer-attachments" aria-label="Arquivos selecionados" hidden></ul>
+            <input id="composer-file-input" type="file" multiple hidden>
             <textarea class="composer__input" id="composer-input" rows="1" placeholder="Pergunte ao Robin" aria-label="Mensagem"></textarea>
             <div class="composer__row">
+              <button class="icon-btn icon-btn--sm" id="attach-button" type="button" aria-label="Anexar arquivos" title="Anexar arquivos">
+                <svg class="icon icon--sm" aria-hidden="true"><use href="#i-paperclip" /></svg>
+              </button>
               <span class="composer__hint"><kbd>Enter</kbd> envia <kbd>Shift Enter</kbd> quebra linha</span>
               <span class="composer__count" id="composer-count" hidden></span>
               <button class="send-btn" id="send-button" type="submit" aria-label="Enviar" disabled>
@@ -315,6 +321,24 @@
           <h2 class="modal__title" id="settings-title">Configurações</h2>
           <button class="icon-btn icon-btn--sm" data-close aria-label="Fechar"><svg class="icon icon--sm"><use href="#i-x" /></svg></button>
         </header>
+
+        <section class="modal__section" id="chatgpt-settings" hidden>
+          <p class="setting-row__title">ChatGPT</p>
+          <p class="field-hint" id="chatgpt-status" role="status"></p>
+          <div class="key-row">
+            <button class="btn btn--primary btn--sm" id="chatgpt-connect" type="button" data-oai-siwc-button>Entrar com o ChatGPT</button>
+            <button class="btn btn--secondary btn--sm" id="chatgpt-new-account" type="button" hidden>Adicionar conta</button>
+            <button class="btn btn--secondary btn--sm" id="chatgpt-disconnect" type="button" hidden>Desconectar</button>
+          </div>
+          <label class="field-label" id="chatgpt-profile-label" for="chatgpt-profile" hidden>Conta salva</label>
+          <select class="input" id="chatgpt-profile" hidden></select>
+          <p class="field-note">Usa a cota da sua conta elegível. As conversas ficam neste PC.</p>
+          <label class="field-label" for="chat-provider">Provedor para novas conversas</label>
+          <select class="input" id="chat-provider" disabled>
+            <option value="gemini">Gemini</option>
+            <option value="chatgpt">ChatGPT</option>
+          </select>
+        </section>
 
         <form class="modal__section" id="key-form" autocomplete="off">
           <label class="field-label" for="key-input">API Key do Gemini</label>

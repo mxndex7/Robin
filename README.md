@@ -1,22 +1,30 @@
 # Robin
 
-Assistente pessoal de desktop para Windows: conversa com o Gemini (`google-genai`), guarda um núcleo fixo sobre você em `memory.md` (vai nas instruções de cada sessão) e tem um **cérebro**: o que você conta e as coisas a fazer, que o próprio Robin grava, busca por significado, atualiza e conclui pelas ferramentas (function calling).
+Assistente pessoal de desktop para Windows: conversa com o ChatGPT ou o Gemini, guarda um núcleo fixo sobre você em `memory.md` (vai nas instruções de cada sessão) e tem um **cérebro**: o que você conta e as coisas a fazer, que o próprio Robin grava, busca por significado, atualiza e conclui pelas ferramentas (function calling).
 
-A janela é **PyWebView** (WebView2). O Python cuida da lógica (Gemini, memória, configuração, janela) e a interface é HTML, CSS e JavaScript puro com ES modules, sem etapa de build e sem CDN.
+A janela é **PyWebView** (WebView2). O Python cuida da lógica (provedores, memória, configuração, janela) e a interface é HTML, CSS e JavaScript puro com ES modules, sem etapa de build e sem CDN.
 
 ## O que o Robin é (e não é)
 
 - **É** um parceiro pessoal de memória e conversa: lembra do que você conta (pessoas, datas, planos, ideias, coisas a fazer), conversa com esse contexto e aconselha.
 - **É** um revisor: cole código, um comando, um log, um texto ou um plano no chat e ele analisa, aponta a causa raiz e sugere a correção.
 - **Não é** um agente de código: não executa comandos, não edita arquivos, não faz commit, push nem nada no Git, e não mexe no seu PC. Quando a solução é uma ação, ele mostra o comando e você confere e roda. Isso está na diretiva (bloco SEGURANÇA) e no próprio código: as únicas ferramentas do modelo leem e alteram a memória dele.
-- Cada pessoa usa a **própria chave do Gemini** e, se quiser sincronizar entre PCs, o **próprio projeto do Supabase**. Nada pessoal fica no repositório: memória, núcleo, chaves e conversas ficam na sua pasta de dados.
+- Cada pessoa conecta a **própria conta do ChatGPT** ou configura a **própria chave do Gemini**. Para sincronizar entre PCs, use o **próprio projeto do Supabase**. Nada pessoal fica no repositório: memória, núcleo, chaves e conversas ficam na sua pasta de dados.
 
 ## Requisitos e limites
 
 - **Só Windows 10 ou 11.** O código usa `winreg` e Win32 (moldura da janela, atalho global, bandeja, instância única, iniciar com o Windows); não roda em macOS nem Linux.
 - **Python 3.13** (as versões das dependências são fixas para ele).
 - **WebView2 Runtime** (já vem no Windows 11; no 10, instale pelo site da Microsoft se faltar).
-- Uma **chave da Gemini API** (abaixo). O Supabase é opcional.
+- Uma **conta do ChatGPT elegível** ou uma **chave da Gemini API**. O Supabase é opcional.
+
+## ChatGPT no Robin
+
+Em **Configurações → ChatGPT**, escolha **Entrar com o ChatGPT**. O navegador abre a autorização oficial. Volte ao Robin após autorizar o uso da cota de uma conta elegível. O Robin mantém a conexão protegida para o usuário do Windows, na própria pasta de dados.
+
+Nas configurações você pode escolher o **provedor para novas conversas**. O provedor de uma conversa existente acompanha o histórico quando você a reabre. O Robin usa sua própria memória e seus próprios arquivos de conversa, inclusive quando a conta é a mesma que você usa no ChatGPT. A memória do Robin é compartilhada entre provedores. O contexto de conversas anteriores fica restrito ao provedor que as gerou. Nesta versão, as conversas do ChatGPT ficam neste PC. A sincronização existente de memória e de conversas do Gemini continua disponível no Supabase.
+
+Quando o ChatGPT é o provedor ativo, a busca na memória usa texto. A busca semântica existente continua disponível no Gemini quando configurado. [Como funciona o uso da cota do ChatGPT](https://help.openai.com/pt-br/articles/20001542-using-your-chatgpt-plan-in-other-apps-and-sites)
 
 ## Chave do Gemini e plano gratuito
 
@@ -26,7 +34,7 @@ No plano gratuito, os limites que medi em **nov/2026** foram **5 pedidos por min
 
 ## Privacidade
 
-- **O Gemini recebe contexto da sua memória:** o núcleo, notas e tarefas dentro do limite de contexto e trechos de conversas recentes entram nas instruções de cada mensagem. A busca por significado também pode enviar texto ao Gemini para calcular embeddings.
+- **O provedor ativo recebe contexto da sua memória:** o núcleo e as notas e tarefas dentro do limite de contexto entram nas instruções de cada mensagem, junto com trechos das conversas recentes do mesmo provedor. Quando o Gemini está ativo, a busca por significado também pode enviar texto ao Google para calcular embeddings.
 - O tratamento desses dados pelo Google depende do plano e dos [termos adicionais da Gemini API](https://ai.google.dev/gemini-api/terms). Consulte os termos aplicáveis à sua conta antes de enviar dados pessoais.
 - A cópia local da memória e das conversas fica em `%APPDATA%\Robin`. Ao ativar a sincronização, o Robin também guarda esses dados no **seu** projeto Supabase.
 - A chave do Gemini e a do Supabase ficam em texto puro no `.env` da pasta de dados. O log (`%LOCALAPPDATA%\Robin\robin.log`) não grava chaves.
@@ -50,7 +58,7 @@ O `requirements.txt` tem só o que o app usa; o `requirements-dev.txt` acrescent
 .venv\Scripts\python app.py
 ```
 
-Na primeira execução aparece **Configure sua API Key**: abra **Configurações** (ícone no canto superior direito ou `Ctrl+K` → "Configurações"), cole a chave e clique em **Salvar chave**. A chave é validada antes de salvar e a interface mostra só os 4 últimos caracteres.
+Na primeira execução, abra **Configurações** e conecte o ChatGPT ou cole a chave da API do Gemini e clique em **Salvar chave**. A chave do Gemini é validada antes de salvar, e a tela mostra os 4 últimos caracteres.
 
 Variáveis de controle (no ambiente ou no `.env` da pasta de dados):
 
@@ -118,6 +126,12 @@ Além do `memory.md`, o Robin guarda sozinho o que vale lembrar, mesmo sem você
 - O que foi feito nunca é apagado: o Robin lembra de tudo.
 - Data, hora e fuso (America/Sao_Paulo) vão nas instruções de cada turno.
 
+### Anexar arquivos
+
+Use o clipe junto ao campo de mensagem para selecionar até quatro arquivos de texto em UTF-8. Código, logs, Markdown e outros formatos de texto compatíveis podem ter até 32 KB por arquivo e 64 KB por mensagem no total. Confira a lista no campo de mensagem e use o botão de remover antes de enviar.
+
+Ao enviar, o provedor ativo recebe o conteúdo dos arquivos. O histórico guarda os nomes, a mensagem e a resposta. Os arquivos originais continuam onde estavam. O conteúdo anexado fica disponível como contexto enquanto a conversa está aberta. Durante essa consulta, o modelo pode usar a memória já presente no contexto. As ferramentas de busca e edição da memória ficam suspensas enquanto o conteúdo dos anexos estiver disponível. Para gravar na memória pelo chat, inicie uma conversa sem anexos. Para usá-lo novamente depois de reabrir a conversa, anexe o arquivo em uma nova mensagem. Trechos incluídos na resposta entram no histórico da conversa e seguem as regras de sincronização do provedor.
+
 ### Conversas
 
 Toda conversa fica guardada neste PC, em `conversas\`, um arquivo por conversa: a mensagem na hora de enviar e a resposta no fim (com as ações, parada ou erro; regenerar troca a última resposta).
@@ -125,7 +139,7 @@ Toda conversa fica guardada neste PC, em `conversas\`, um arquivo por conversa: 
 - A aba **Conversas** lista por data (Hoje, Ontem, Últimos 7 dias, Mais antigas), busca no título e no texto, reabre para continuar e apaga (dois cliques). **Nova conversa** (`Ctrl+L`, lateral ou ícone do cabeçalho) não apaga nada.
 - O Robin lê trechos das conversas mais recentes em toda mensagem (até ~8 mil caracteres, sem pedido extra). Quando você fala de algo mais antigo, ele busca nas conversas antigas (`buscar_conversas`, 1 pedido a mais), e essa busca só aparece quando há conversa fora dos trechos.
 - Reabrir uma conversa: a sessão recebe o texto das mensagens mais recentes (até ~60 mil caracteres); as ações antigas não voltam, porque a memória já vai inteira nas instruções.
-- **Na nuvem:** com o Supabase configurado e as tabelas das conversas criadas (veja abaixo), toda conversa também vai para a nuvem e aparece nos seus outros PCs. Apagar num PC apaga nos outros.
+- **Na nuvem:** com o Supabase configurado e as tabelas das conversas criadas (veja abaixo), as conversas do Gemini também aparecem nos seus outros PCs. Apagar uma conversa sincronizada num PC apaga nos outros.
 
 ### Memória na nuvem (Supabase)
 
@@ -154,7 +168,7 @@ Opcional: a mesma memória e as mesmas conversas nos seus PCs, num projeto do Su
 - **Migração:** na primeira conexão, os itens do `brain.json` que ainda não estão na nuvem sobem (registrado no log).
 - **Projeto pausado:** o Supabase gratuito pausa depois de 7 dias sem uso. O Robin mostra "Banco pausado: reative no painel do Supabase" e segue com a cópia local só para leitura até você reativar.
 - **Desconectar** (Configurações) volta para o `brain.json` e o `memory.md` locais; a fila continua no `sync.json` para quando reconectar.
-- **Conversas:** o `scripts/supabase_conversas.sql` (passo 2, depois do das memórias) cria as tabelas `conversations` e `conversation_messages` (com RLS ligado e sem políticas, então só a chave secreta lê e grava) e não mexe na `memories`. Cada mensagem vai para a nuvem numa fila, sem atrasar a conversa; sem internet, ela espera e sai sozinha depois. Na primeira conexão, as conversas que já estavam no PC sobem. Apagar uma conversa tira as mensagens dela da nuvem e deixa só uma marca (sem o título) para os outros PCs apagarem também. Se a conversa aberta for apagada em outro PC, o Robin começa outra. Sem as tabelas, as conversas ficam só no PC e o Robin avisa uma vez.
+- **Conversas:** o `scripts/supabase_conversas.sql` (passo 2, depois do das memórias) cria as tabelas `conversations` e `conversation_messages` (com RLS ligado e sem políticas, então só a chave secreta lê e grava) e não mexe na `memories`. As mensagens do Gemini entram na fila de sincronização sem atrasar a conversa. Na primeira conexão, sobem as conversas do Gemini que já estavam no PC. Apagar uma conversa tira as mensagens dela da nuvem e deixa só uma marca (sem o título) para os outros PCs apagarem também. Se a conversa aberta for apagada em outro PC, o Robin começa outra. Sem as tabelas, as conversas ficam só no PC e o Robin avisa uma vez.
 
 ### Sync Git da memória
 

@@ -4,11 +4,13 @@ O pywebview expõe os métodos públicos e percorre os atributos públicos do ob
 por isso todo o estado interno fica em atributos com "_".
 """
 
+import hashlib
 import itertools
 import json
 import logging
 import os
 import queue
+import secrets
 import threading
 import time
 import webbrowser
@@ -44,9 +46,13 @@ from .config import (
     write_env,
 )
 from . import cloud_mock, timing
+from .attachments import attachment_limits, message_with_attachments, text_attachments
 from .brain import BrainError, LocalStore, StaleError
 from .build import current_build
-from .conversations import ConversationRecorder, ConversationStore, history_for_session
+from .chatgpt import ChatGPTService, DEFAULT_CHATGPT_MODEL
+from .chatgpt_auth import ChatGPTAccount, ChatGPTAuthError, SESSION_FILE
+from .conversations import (ConversationContext, ConversationRecorder, ConversationStore,
+                            conversation_identity, history_for_session)
 from .conversations_cloud import ConversationCloud
 from .gemini import GeminiError, GeminiService, validate_api_key
 from .hotkey import DEFAULT_HOTKEY
@@ -68,6 +74,8 @@ def _error(code: str, message: str) -> dict:
 
 # Nova tentativa automática da fila enquanto a nuvem estiver fora (além de abrir e aparecer a janela).
 CLOUD_RETRY_SECONDS = 60.0
+ENV_PROVIDER = "ROBIN_PROVIDER"
+ENV_CHATGPT_MODEL = "ROBIN_CHATGPT_MODEL"
 # Entrega de um evento à interface acima disto vai para o log como aviso.
 EVENT_SLOW_MS = 2000
 
@@ -92,6 +100,14 @@ class RobinAPI:
         self._build = current_build()  # origem e build (rodapé das Configurações)
         self._gen_ids = itertools.count(1)
         self._mock = MOCK
+        self._chat_lock = threading.RLock()
+        self._attachment_turn: Optional[str] = None
+        self._attachment_scope = secrets.token_hex(16)
+        self._chatgpt_account = ChatGPTAccount(DATA_DIR / SESSION_FILE)
+        self._chatgpt_model = env.get(ENV_CHATGPT_MODEL) or DEFAULT_CHATGPT_MODEL
+        self._chatgpt = None
+        self._preferred_provider = env.get(ENV_PROVIDER, "gemini")
+        self._provider = "gemini"
         service = MockGeminiService if self._mock else GeminiService
         # Cérebro: brain.json na pasta de dados (na simulação, na pasta mock\). Com o Supabase, ele é a
         # cópia local e o backup do SupabaseStore.
@@ -114,13 +130,112 @@ class RobinAPI:
             store=self._local,
             core=self._core_text,
             rate_limit=_rate_limit(env),
-            conversations=self._recorder,
+            conversations=ConversationContext(self._recorder, "gemini"),
+            manage_embeddings=self._default_provider() == "gemini",
         )
+        self._select_provider(self._default_provider())
         url = env.get(ENV_SUPABASE_URL, "").strip()
         if url and self._supabase_key:
             self._connect(url, self._supabase_key)
         else:
             self._cleanup_local()
+
+    @property
+    def _service(self):
+        return self._chatgpt if self._provider == "chatgpt" else self._gemini
+
+    def _provider_ready(self, provider: str) -> bool:
+        if provider == "chatgpt":
+            return not self._mock and self._chatgpt_account.status()["connected"]
+        return bool(self._api_key) or self._mock
+
+    def _identity(self) -> tuple[str, str]:
+        return self._provider, self._chatgpt_account.profile_tag() if self._provider == "chatgpt" else ""
+
+    def _attachment_context(self) -> str:
+        provider, profile = self._identity()
+        return hashlib.sha256(f"{self._attachment_scope}:{provider}:{profile}".encode()).hexdigest()
+
+    def _chat_connection_error(self) -> Optional[dict]:
+        if not self._provider_ready(self._provider):
+            return _error("no_key", "Conecte o provedor desta conversa nas Configurações.")
+        identity = self._recorder.identity
+        if identity is not None and identity != self._identity():
+            return _error("other_account", "Esta conversa pertence a outra conta do ChatGPT. Abra uma nova conversa ou conecte a conta original.")
+        return None
+
+    def _default_provider(self) -> str:
+        if self._mock:
+            return "gemini"
+        if self._preferred_provider in {"gemini", "chatgpt"} and self._provider_ready(self._preferred_provider):
+            return self._preferred_provider
+        return "chatgpt" if self._provider_ready("chatgpt") else "gemini"
+
+    def _select_provider(self, provider: str) -> None:
+        self._gemini.set_embeddings_enabled(provider == "gemini")
+        if provider == "chatgpt" and self._chatgpt is None:
+            self._chatgpt = ChatGPTService(
+                self._chatgpt_account, emit=self._emit, model=self._chatgpt_model,
+                store=self._brain(), core=self._core_text,
+                conversations=ConversationContext(self._recorder, "chatgpt", self._chatgpt_account.profile_tag),
+            )
+        if self._provider != provider:
+            self._attachment_scope = secrets.token_hex(16)
+        self._provider = provider
+
+    def _set_chat_store(self, store) -> None:
+        with self._chat_lock:
+            self._gemini.set_store(store)
+            if self._chatgpt is not None:
+                self._chatgpt.set_store(store)
+
+    def set_chat_provider(self, provider: str) -> dict:
+        with self._chat_lock:
+            if provider not in ("chatgpt", "gemini") or not self._provider_ready(provider):
+                return _error("no_key", "Conecte esse provedor primeiro.")
+            if self._service.is_generating:
+                return _error("busy", "Pare a geração antes de trocar o provedor.")
+            self._preferred_provider = provider
+            write_env(ENV_PROVIDER, provider)
+            if self._recorder.current_id is None:
+                self._service.clear()
+                self._select_provider(provider)
+            return {"ok": True, "state": self.get_state()}
+
+    def begin_chatgpt(self, new_account: bool = False, client_id: str = "") -> dict:
+        if self._mock:
+            return _error("mock", "O login fica disponível no Robin fora da simulação.")
+        with self._chat_lock:
+            if self._service.is_generating:
+                return _error("busy", "Pare a geração antes de conectar outra conta.")
+            if self._chatgpt_account.status()["connected"]:
+                return _error("connected", "Desconecte a conta atual primeiro.")
+            try:
+                self._chatgpt_account.begin(new_account=new_account is True, client_id=str(client_id or ""))
+            except (ChatGPTAuthError, OSError) as error:
+                return _error("chatgpt_auth", str(error) if isinstance(error, ChatGPTAuthError) else
+                              "O Windows não conseguiu salvar a conexão do ChatGPT.")
+            return {"ok": True, **self._chatgpt_account.status()}
+
+    def chatgpt_status(self) -> dict:
+        with self._chat_lock:
+            status = self._chatgpt_account.status()
+            if self._recorder.current_id is None and not self._service.is_generating:
+                provider = self._default_provider()
+                if provider != self._provider:
+                    self._service.clear()
+                    self._select_provider(provider)
+            return {"ok": True, **status, "state": self.get_state()}
+
+    def disconnect_chatgpt(self) -> dict:
+        with self._chat_lock:
+            if self._service.is_generating:
+                return _error("busy", "Pare a geração antes de desconectar.")
+            try:
+                self._chatgpt_account.disconnect()
+            except OSError:
+                return _error("io", "O Windows não conseguiu atualizar a conexão do ChatGPT.")
+            return self.chatgpt_status()
 
     # ---------- uso interno (app.py) ----------
 
@@ -181,10 +296,20 @@ class RobinAPI:
         self._conversation_cloud = ConversationCloud(
             client, CONVERSATION_SYNC_FILE, self._conversations, self._recorder,
             on_notice=lambda message: self._emit("onCloudNotice", {"message": message, "tone": "warn"}),
+            apply_remote=self._apply_remote_conversations,
         )
         self._recorder.cloud = self._conversation_cloud
-        self._gemini.set_store(self._cloud)
+        self._set_chat_store(self._cloud)
         self._start_sync(initial=True)
+
+    def _apply_remote_conversations(self, heads, rows):
+        with self._chat_lock:
+            result = self._recorder.apply_remote(heads, rows)
+            if result[2]:
+                self._service.clear()
+                self._attachment_turn = None
+                self._attachment_scope = secrets.token_hex(16)
+            return result
 
     def _start_sync(self, initial: bool = False) -> None:
         threading.Thread(target=self._sync, args=(initial,), daemon=True).start()
@@ -214,7 +339,7 @@ class RobinAPI:
         for message in cloud.take_conflicts():
             self._emit("onCloudNotice", {"message": message, "tone": "warn"})
         # Núcleo e memória nova valem já no próximo turno.
-        self._gemini.rebuild()
+        self._service.rebuild()
         if self._core_text() != core_before:
             self._emit("onMemoryChanged", {})
         if summary.get("ok"):
@@ -290,7 +415,7 @@ class RobinAPI:
             return _error("invalid_url", "Use a URL do projeto: https://<projeto>.supabase.co")
         if not key:
             return _error("empty", "Informe a chave secreta do Supabase.")
-        if self._gemini.is_generating:
+        if self._service.is_generating:
             return _error("busy", "Pare a geração antes de trocar a nuvem.")
         client = SupabaseClient(url, key, transport=cloud_transport())
         try:
@@ -309,13 +434,13 @@ class RobinAPI:
 
     def disconnect_supabase(self) -> dict:
         """Volta a usar só o brain.json e o memory.md. A cópia local e a fila (sync.json) ficam."""
-        if self._gemini.is_generating:
+        if self._service.is_generating:
             return _error("busy", "Pare a geração antes de desconectar a nuvem.")
         write_env(ENV_SUPABASE_URL, "")
         write_env(ENV_SUPABASE_KEY, "")
         self._supabase_key = ""
         self._close_cloud()
-        self._gemini.set_store(self._local)
+        self._set_chat_store(self._local)
         self._emit("onMemoryChanged", {})
         return {"ok": True, **self.get_settings()}
 
@@ -346,8 +471,11 @@ class RobinAPI:
         return {
             "app": APP_NAME,
             "version": APP_VERSION,
-            "model": self._gemini.model,
-            "has_key": bool(self._api_key) or self._mock,  # a simulação não precisa de chave
+            "model": self._service.model,
+            "provider": self._provider,
+            "attachments": {**attachment_limits(), "context": self._attachment_context()},
+            "has_key": self._chat_connection_error() is None,
+            "can_regenerate": self._can_regenerate(),
             "mock": self._mock,
             "frame": self._frame.mode if self._frame else "native",
             "maximized": bool(self._frame and self._frame.is_maximized()),
@@ -357,40 +485,69 @@ class RobinAPI:
 
     # ---------- chat ----------
 
-    def send_message(self, text: str) -> dict:
-        text = (text or "").strip()
-        if not text:
-            return _error("empty", "Mensagem vazia.")
-        gen_id = next(self._gen_ids)
-        # Antes do envio: os eventos da geração podem chegar antes de send() voltar.
-        self._recorder.begin(gen_id, text)
-        try:
-            self._gemini.send(text, gen_id)
-        except GeminiError as error:
-            self._recorder.abort(gen_id)
-            return _error(error.code, error.message)
-        except Exception as error:  # noqa: BLE001 - montar a sessão falhou: a interface sai de "pensando"
-            self._recorder.abort(gen_id)
-            logger.exception("send_message falhou")
-            return _error("internal", f"Falha interna ao enviar: {type(error).__name__}. Detalhes no robin.log.")
-        return {"ok": True, "gen_id": gen_id}
+    def send_message(self, text: str, attachments=None, attachment_context: str = "") -> dict:
+        with self._chat_lock:
+            if not isinstance(text, str):
+                return _error("empty", "Mensagem inválida.")
+            text = text.strip()
+            if attachments and attachment_context != self._attachment_context():
+                return _error("attachment_context", "A conversa ou o provedor mudou. Selecione os arquivos novamente.")
+            try:
+                files = text_attachments(attachments)
+            except ValueError as error:
+                return _error("attachment", str(error))
+            if not text:
+                if not files:
+                    return _error("empty", "Mensagem vazia.")
+                text = "Analise os arquivos anexados."
+            if error := self._chat_connection_error():
+                return error
+            if self._service.is_generating:
+                return _error("busy", "Aguarde a resposta atual ou pare a geração.")
+            gen_id = next(self._gen_ids)
+            # Antes do envio: os eventos da geração podem chegar antes de send() voltar.
+            turn = self._recorder.begin(gen_id, text, identity=self._identity(),
+                                        attachments=[file["name"] for file in files])
+            try:
+                self._service.send(message_with_attachments(text, files), gen_id, memory_read_only=bool(files))
+            except GeminiError as error:
+                self._recorder.abort(gen_id)
+                return _error(error.code, error.message)
+            except Exception as error:  # noqa: BLE001 - montar a sessão falhou: a interface sai de "pensando"
+                self._recorder.abort(gen_id)
+                logger.exception("send_message falhou")
+                return _error("internal", f"Falha interna ao enviar: {type(error).__name__}. Detalhes no robin.log.")
+            self._attachment_turn = turn if files else None
+            return {"ok": True, "gen_id": gen_id}
 
     def stop_generation(self) -> dict:
-        return {"ok": self._gemini.stop()}
+        with self._chat_lock:
+            return {"ok": self._service.stop()}
+
+    def _can_regenerate(self) -> bool:
+        attachment_turn = self._recorder.last_attachment_turn
+        return not attachment_turn or attachment_turn == self._attachment_turn
 
     def regenerate(self) -> dict:
-        gen_id = next(self._gen_ids)
-        self._recorder.begin_regenerate(gen_id)
-        try:
-            self._gemini.regenerate(gen_id)
-        except GeminiError as error:
-            self._recorder.abort(gen_id)
-            return _error(error.code, error.message)
-        except Exception as error:  # noqa: BLE001 - idem send_message
-            self._recorder.abort(gen_id)
-            logger.exception("regenerate falhou")
-            return _error("internal", f"Falha interna ao regenerar: {type(error).__name__}. Detalhes no robin.log.")
-        return {"ok": True, "gen_id": gen_id}
+        with self._chat_lock:
+            if not self._can_regenerate():
+                return _error("reattach", "Os anexos anteriores ficaram fora do histórico. Anexe os arquivos em uma nova mensagem.")
+            if error := self._chat_connection_error():
+                return error
+            if self._service.is_generating:
+                return _error("busy", "Aguarde a resposta atual ou pare a geração.")
+            gen_id = next(self._gen_ids)
+            self._recorder.begin_regenerate(gen_id)
+            try:
+                self._service.regenerate(gen_id)
+            except GeminiError as error:
+                self._recorder.abort(gen_id)
+                return _error(error.code, error.message)
+            except Exception as error:  # noqa: BLE001 - idem send_message
+                self._recorder.abort(gen_id)
+                logger.exception("regenerate falhou")
+                return _error("internal", f"Falha interna ao regenerar: {type(error).__name__}. Detalhes no robin.log.")
+            return {"ok": True, "gen_id": gen_id}
 
     # ---------- conversas guardadas ----------
 
@@ -403,37 +560,50 @@ class RobinAPI:
 
     def new_conversation(self) -> dict:
         """Conversa nova: a sessão fica vazia e a anterior continua guardada."""
-        self._gemini.clear()
-        self._recorder.new()
-        return {"ok": True}
+        with self._chat_lock:
+            self._service.clear()
+            self._recorder.new()
+            self._attachment_turn = None
+            self._attachment_scope = secrets.token_hex(16)
+            self._select_provider(self._default_provider())
+            return {"ok": True, "state": self.get_state()}
 
     def open_conversation(self, conversation_id: str) -> dict:
         """Continua uma conversa guardada: a sessão recebe o histórico em texto (as mais recentes,
         até MAX_REOPEN_HISTORY_CHARS) e as próximas mensagens entram nela."""
-        conversation_id = str(conversation_id or "")
-        if conversation_id and conversation_id == self._recorder.current_id:
-            return {"ok": True, "conversation": self._conversations.get(conversation_id), "current": True}
-        conversation = self._conversations.get(conversation_id)
-        if conversation is None:
-            return _error("not_found", "Essa conversa não existe mais.")
-        self._gemini.load_history(history_for_session(conversation, MAX_REOPEN_HISTORY_CHARS))
-        self._recorder.open(conversation)
-        return {"ok": True, "conversation": conversation}
+        with self._chat_lock:
+            conversation_id = str(conversation_id or "")
+            if conversation_id and conversation_id == self._recorder.current_id:
+                return {"ok": True, "conversation": self._conversations.get(conversation_id), "current": True}
+            conversation = self._conversations.get(conversation_id)
+            if conversation is None:
+                return _error("not_found", "Essa conversa não existe mais.")
+            self._service.clear()
+            self._select_provider(conversation_identity(conversation)[0])
+            self._service.load_history(history_for_session(conversation, MAX_REOPEN_HISTORY_CHARS))
+            self._recorder.open(conversation)
+            self._attachment_turn = None
+            self._attachment_scope = secrets.token_hex(16)
+            return {"ok": True, "conversation": conversation, "state": self.get_state(),
+                    "can_regenerate": self._recorder.last_attachment_turn is None}
 
     def delete_conversation(self, conversation_id: str) -> dict:
         """Apaga do PC (e, com a nuvem, dos outros PCs). Se for a atual, a conversa recomeça vazia."""
-        conversation_id = str(conversation_id or "")
-        was_current = conversation_id == self._recorder.current_id
-        if was_current:
-            self._gemini.clear()
-        try:
-            deleted = self._recorder.delete(conversation_id)
-        except OSError as error:
-            logger.error("Conversa não apagada (%s): %s", conversation_id, error)
-            return _error("io", f"Não foi possível apagar a conversa: {error}")
-        if not deleted and not was_current:
-            return _error("not_found", "Essa conversa não existe mais.")
-        return {"ok": True, "was_current": was_current}
+        with self._chat_lock:
+            conversation_id = str(conversation_id or "")
+            was_current = conversation_id == self._recorder.current_id
+            if was_current:
+                self._service.clear()
+                self._attachment_turn = None
+                self._attachment_scope = secrets.token_hex(16)
+            try:
+                deleted = self._recorder.delete(conversation_id)
+            except OSError as error:
+                logger.error("Conversa não apagada (%s): %s", conversation_id, error)
+                return _error("io", f"Não foi possível apagar a conversa: {error}")
+            if not deleted and not was_current:
+                return _error("not_found", "Essa conversa não existe mais.")
+            return {"ok": True, "was_current": was_current}
 
     # ---------- o que o Robin guardou (aba Memória) ----------
 
@@ -481,33 +651,51 @@ class RobinAPI:
     # ---------- modelo e chave ----------
 
     def get_models(self) -> dict:
+        service = self._service
         return {
-            "models": self._gemini.list_models(),
-            "current": self._gemini.model,
-            "no_quota": self._gemini.no_quota_models,
+            "models": service.list_models(),
+            "current": service.model,
+            "no_quota": service.no_quota_models,
         }
 
     def set_model(self, name: str) -> dict:
-        name = (name or "").strip()
-        if not name:
-            return _error("empty", "Modelo inválido.")
-        self._gemini.set_model(name)
-        write_env(ENV_MODEL, name)
-        return {"ok": True, "model": name}
+        with self._chat_lock:
+            name = (name or "").strip()
+            if not name:
+                return _error("empty", "Modelo inválido.")
+            if self._service.is_generating:
+                return _error("busy", "Pare a geração antes de trocar o modelo.")
+            if self._provider == "chatgpt" and name not in self._service.list_models():
+                return _error("model_unavailable", "Esse modelo não está disponível no ChatGPT.")
+            self._service.set_model(name)
+            if self._provider == "chatgpt":
+                self._chatgpt_model = name
+            write_env(ENV_CHATGPT_MODEL if self._provider == "chatgpt" else ENV_MODEL, name)
+            return {"ok": True, "model": name}
 
     def set_api_key(self, key: str) -> dict:
-        key = (key or "").strip()
-        if not key:
-            return _error("empty", "Informe a API Key.")
-        if self._gemini.is_generating:
-            return _error("busy", "Pare a geração antes de trocar a chave.")
-        error = None if self._mock else validate_api_key(key)  # a simulação não acessa a rede
-        if error:
-            return _error(error.code, error.message)
-        write_env(ENV_API_KEY, key)
-        self._api_key = key
-        self._gemini.configure(key)
-        return {"ok": True, "key_hint": _key_hint(key)}
+        with self._chat_lock:
+            key = (key or "").strip()
+            if not key:
+                return _error("empty", "Informe a API Key.")
+            if self._service.is_generating:
+                return _error("busy", "Pare a geração antes de trocar a chave.")
+            error = None if self._mock else validate_api_key(key)  # a simulação não acessa a rede
+            if error:
+                return _error(error.code, error.message)
+            write_env(ENV_API_KEY, key)
+            changed = self._api_key != key
+            self._api_key = key
+            self._gemini.configure(key)
+            if changed and self._provider == "gemini":
+                self._attachment_scope = secrets.token_hex(16)
+                if self._gemini.has_attachment_context:
+                    current = self._conversations.get(self._recorder.current_id)
+                    self._gemini.load_history(history_for_session(current, MAX_REOPEN_HISTORY_CHARS) if current else [])
+                    self._attachment_turn = None
+            if self._recorder.current_id is None:
+                self._select_provider(self._default_provider())
+            return {"ok": True, "key_hint": _key_hint(key), "state": self.get_state()}
 
     # ---------- memória ----------
 
@@ -537,7 +725,7 @@ class RobinAPI:
         except (OSError, ValueError) as error:
             logger.error("save_memory falhou: %s: %s", type(error).__name__, error)
             return _error("io", f"Não foi possível salvar o memory.md: {error}")
-        self._gemini.rebuild()
+        self._service.rebuild()
 
         if read_env().get(ENV_GIT_SYNC) == "1" and git_available():  # só sem o Supabase
             threading.Thread(target=self._sync_git, daemon=True).start()
@@ -558,7 +746,7 @@ class RobinAPI:
                                    "versão nova (suas alterações continuam no editor até lá).")
         except BrainError as error:
             return _error("cloud", str(error))
-        self._gemini.rebuild()
+        self._service.rebuild()
         return {"ok": True, "sync": "pending" if item.get("sync") == "pending" else "cloud"}
 
     def _sync_git(self) -> None:
@@ -578,6 +766,9 @@ class RobinAPI:
             "git_sync": env.get(ENV_GIT_SYNC) == "1" and self._cloud is None,
             "git_available": git_available(),
             "key_hint": _key_hint(self._api_key),
+            "chatgpt_enabled": not self._mock,
+            "chatgpt": self._chatgpt_account.status(),
+            "preferred_provider": self._preferred_provider,
             "data_dir": str(DATA_DIR),
             "supabase_url": env.get(ENV_SUPABASE_URL, "").strip(),
             "supabase_key_hint": _key_hint(self._supabase_key),

@@ -21,6 +21,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .conversations import conversation_identity
 from .brain import atomic_write, machine_name, parse_time
 from .supabase import CloudError, SupabaseClient
 
@@ -116,11 +117,11 @@ class ConversationCloud:
     migração lê o store; o que vem da nuvem é gravado só pelo recorder (apply_remote)."""
 
     def __init__(self, client: SupabaseClient, state_file: Path, store: Any, recorder: Any,
-                 on_notice: Callable[[str], None] = lambda message: None):
+                 on_notice: Callable[[str], None] = lambda message: None, *, apply_remote=None):
         self._client = client
         self._state = _State(state_file)
         self._store = store
-        self._recorder = recorder
+        self._apply_remote = apply_remote or recorder.apply_remote
         self._on_notice = on_notice
         self._lock = threading.RLock()  # envio da fila e pull, um de cada vez
         self._available = True  # False: as tabelas não existem (até um pull dar certo)
@@ -226,7 +227,7 @@ class ConversationCloud:
                     logger.warning("Conversas: pull falhou (%s)", error.kind)
                 return {"ok": False, "kind": error.kind}
             self._available = True
-            changed, deleted, current_deleted = self._recorder.apply_remote(head_by_id, by_conversation)
+            changed, deleted, current_deleted = self._apply_remote(head_by_id, by_conversation)
             for table, cursor in ((CONVERSATIONS, heads_cursor), (MESSAGES, rows_cursor)):
                 if cursor:
                     self._state.set_cursor(table, cursor)
@@ -250,7 +251,7 @@ class ConversationCloud:
         sent = 0
         for summary in self._store.summaries():
             conversation = self._store.get(summary["id"])
-            if conversation and conversation["messages"]:
+            if conversation and conversation["messages"] and conversation_identity(conversation)[0] == "gemini":
                 self._send(_save_op(conversation, conversation["messages"]))
                 sent += 1
         self._state.mark_migrated(self._client.url)

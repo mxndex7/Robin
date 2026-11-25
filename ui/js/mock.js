@@ -438,6 +438,11 @@ export function createMockApi(emit) {
       return {
         app: "Robin",
         version: "mock",
+        attachments: {
+          max_files: 4, max_file_bytes: 32 * 1024, max_total_bytes: 64 * 1024, context: "mock",
+          extensions: [".txt", ".md", ".log", ".json", ".csv", ".py", ".js", ".ts"],
+          basenames: ["dockerfile", "makefile", "readme"],
+        },
         model,
         has_key: hasKey,
         mock: params.has("sim"),
@@ -447,10 +452,10 @@ export function createMockApi(emit) {
         cloud,
       };
     },
-    async send_message(text) {
-      if (!text.trim()) return { ok: false, code: "empty", error: "Mensagem vazia." };
+    async send_message(text, files = []) {
+      if (!text.trim() && !files.length) return { ok: false, code: "empty", error: "Mensagem vazia." };
       if (!hasKey) return startGeneration();
-      return startGeneration(text);
+      return startGeneration(text || "Analise os arquivos anexados.");
     },
     async regenerate() {
       return startGeneration();

@@ -80,6 +80,15 @@ def _summary(conversation: dict) -> dict:
     }
 
 
+def conversation_identity(conversation: dict) -> tuple[str, str]:
+    """O JSON de ações da primeira mensagem leva provedor e conta no sync existente."""
+    first = next((message for message in conversation["messages"] if message["role"] == USER), {})
+    meta = first.get("actions")
+    if isinstance(meta, dict) and meta.get("provider") == "chatgpt":
+        return "chatgpt", meta.get("profile") or ""
+    return "gemini", ""
+
+
 def history_for_session(conversation: dict, budget: int) -> list[tuple[str, str]]:
     """As mensagens mais recentes (até `budget` caracteres) como (papel, texto) para a sessão do
     Gemini: "user" e "model", só texto (resposta sem texto fica de fora). Começa pelo usuário."""
@@ -108,8 +117,14 @@ class ConversationStore:
         self._lock = threading.RLock()
         self._index: Optional[dict[str, dict]] = None
 
-    def _path(self, conversation_id: str) -> Path:
-        return self._folder / f"{conversation_id}.json"
+    def _path(self, conversation_id: str, *, chatgpt: bool = False) -> Path:
+        # Versões antigas enumeram apenas .json quando montam o contexto do Gemini.
+        suffix = "chatgpt" if chatgpt else "json"
+        return self._folder / f"{conversation_id}.{suffix}"
+
+    def _existing_path(self, conversation_id: str) -> Path:
+        local = self._path(conversation_id, chatgpt=True)
+        return local if local.exists() else self._path(conversation_id)
 
     def _read(self, path: Path) -> Optional[dict]:
         try:
@@ -127,7 +142,7 @@ class ConversationStore:
     def _load_index(self) -> dict[str, dict]:
         if self._index is None:
             index = {}
-            for path in sorted(self._folder.glob("*.json")) if self._folder.exists() else []:
+            for path in sorted([*self._folder.glob("*.json"), *self._folder.glob("*.chatgpt")]):
                 data = self._read(path)
                 if data is not None:
                     index[data["id"]] = _summary(data)
@@ -147,13 +162,14 @@ class ConversationStore:
     def get(self, conversation_id: str) -> Optional[dict]:
         if not _valid_id(conversation_id):
             return None
-        return self._read(self._path(conversation_id))
+        return self._read(self._existing_path(conversation_id))
 
     def save(self, conversation: dict) -> None:
         """Grava a conversa inteira. Levanta OSError."""
         text = json.dumps(conversation, ensure_ascii=False, indent=1)
         with self._lock:
-            atomic_write(self._path(conversation["id"]), text, ".conversa-")
+            path = self._path(conversation["id"], chatgpt=conversation_identity(conversation)[0] == "chatgpt")
+            atomic_write(path, text, ".conversa-")
             self._load_index()[conversation["id"]] = _summary(conversation)
 
     def delete(self, conversation_id: str) -> bool:
@@ -162,12 +178,13 @@ class ConversationStore:
         with self._lock:
             self._load_index().pop(conversation_id, None)
             try:
-                self._path(conversation_id).unlink()
+                self._existing_path(conversation_id).unlink()
             except FileNotFoundError:
                 return False
             return True
 
-    def excerpt(self, exclude: Optional[str], budget: int, message_chars: int) -> tuple[str, bool]:
+    def excerpt(self, exclude: Optional[str], budget: int, message_chars: int,
+                *, identity: Optional[tuple[str, str]] = None) -> tuple[str, bool]:
         """Trechos das conversas mais recentes (menos a `exclude`) para o system_instruction: as
         mensagens mais novas até `budget` caracteres, em ordem cronológica e agrupadas por conversa.
         Devolve (texto, cortou); cortou = ficou mensagem de fora, e aí buscar_conversas é oferecida."""
@@ -176,12 +193,12 @@ class ConversationStore:
         for summary in self.summaries():
             if summary["id"] == exclude:
                 continue
+            conversation = self.get(summary["id"])
+            if conversation is None or (identity is not None and conversation_identity(conversation) != identity):
+                continue
             if used >= budget:
                 cut = True
                 break
-            conversation = self.get(summary["id"])
-            if conversation is None:
-                continue
             header = f"— {_local(conversation.get('created_at', ''), '%d/%m/%Y')} · \"{summary['title']}\""
             used += len(header) + 1
             lines: list[str] = []
@@ -204,7 +221,8 @@ class ConversationStore:
             parts.append("— … há conversas mais antigas fora daqui: para elas, use buscar_conversas.")
         return ("\n\n".join(parts) or "(nenhuma ainda)"), cut
 
-    def search(self, query: str, exclude: Optional[str], limit: int) -> list[dict]:
+    def search(self, query: str, exclude: Optional[str], limit: int,
+               *, identity: Optional[tuple[str, str]] = None) -> list[dict]:
         """Mensagens das outras conversas com as palavras da consulta (sem acento e caixa), das mais
         parecidas e recentes para as menos."""
         found = []
@@ -212,7 +230,9 @@ class ConversationStore:
             if summary["id"] == exclude:
                 continue
             conversation = self.get(summary["id"])
-            for message in conversation["messages"] if conversation else []:
+            if conversation is None or (identity is not None and conversation_identity(conversation) != identity):
+                continue
+            for message in conversation["messages"]:
                 text = message.get("text") or ""
                 score = text_score(query, {"content": text, "tags": []}) if text.strip() else 0.0
                 if score > 0:
@@ -255,6 +275,21 @@ def merge_remote(local: Optional[dict], head: Optional[dict], rows: list[dict]) 
     return merged
 
 
+class ConversationContext:
+    """Contexto que um provedor pode consultar para além da conversa atual."""
+
+    def __init__(self, recorder, provider: str, account: Callable[[], str] = lambda: ""):
+        self._recorder = recorder
+        self._provider = provider
+        self._account = account
+
+    def prompt_excerpt(self) -> tuple[str, bool]:
+        return self._recorder.prompt_excerpt(identity=(self._provider, self._account()))
+
+    def search(self, query: str, limit: int) -> list[dict]:
+        return self._recorder.search(query, limit, identity=(self._provider, self._account()))
+
+
 class ConversationRecorder:
     """A conversa atual e as respostas em andamento (por gen_id), montadas pelos eventos da geração.
     Os eventos chegam das threads da geração; abrir, nova e apagar, da interface; o que veio da nuvem,
@@ -277,26 +312,49 @@ class ConversationRecorder:
 
     # ---------- o que o GeminiService usa ----------
 
-    def prompt_excerpt(self) -> tuple[str, bool]:
-        return self._store.excerpt(self.current_id, config.MAX_PROMPT_CONVERSATION_CHARS, config.PROMPT_MESSAGE_CHARS)
+    @property
+    def identity(self) -> Optional[tuple[str, str]]:
+        with self._lock:
+            return conversation_identity(self._current) if self._current else None
 
-    def search(self, query: str, limit: int) -> list[dict]:
-        return self._store.search(query, self.current_id, limit)
+    def prompt_excerpt(self, *, identity: Optional[tuple[str, str]] = None) -> tuple[str, bool]:
+        return self._store.excerpt(self.current_id, config.MAX_PROMPT_CONVERSATION_CHARS,
+                                   config.PROMPT_MESSAGE_CHARS, identity=identity)
+
+    def search(self, query: str, limit: int, *, identity: Optional[tuple[str, str]] = None) -> list[dict]:
+        return self._store.search(query, self.current_id, limit, identity=identity)
 
     # ---------- geração ----------
 
-    def begin(self, gen_id: int, text: str) -> None:
-        """Mensagem do usuário, gravada já: fechar o app no meio da resposta não a perde."""
+    def begin(self, gen_id: int, text: str, identity: tuple[str, str] = ("gemini", ""),
+              attachments: Optional[list[str]] = None) -> str:
+        """Grava a mensagem do usuário antes da resposta e devolve o ID do turno."""
         with self._lock:
             if self._current is None:
                 stamp = now_iso()
                 self._current = {"id": str(uuid.uuid4()), "title": title_for(text), "created_at": stamp,
                                  "updated_at": stamp, "updated_by": machine_name(), "messages": []}
             message = _message(USER, text)
+            provider, profile = identity
+            if provider == "chatgpt" and not self._current["messages"]:
+                message["actions"] = {"provider": provider, "profile": profile}
+            if attachments:
+                message.setdefault("actions", {})["attachments"] = attachments
             self._current["messages"].append(message)
             self._pending[gen_id] = {"text": "", "actions": [], "user": message["id"], "regenerate": False}
             self._save()
             self._to_cloud("saved", self._current, [message])
+            return message["id"]
+
+    @property
+    def last_attachment_turn(self) -> Optional[str]:
+        """ID do último turno quando sua mensagem contém metadados de anexos."""
+        with self._lock:
+            if not self._current:
+                return None
+            message = next((msg for msg in reversed(self._current["messages"]) if msg["role"] == USER), {})
+            meta = message.get("actions")
+            return message["id"] if isinstance(meta, dict) and meta.get("attachments") else None
 
     def begin_regenerate(self, gen_id: int) -> None:
         with self._lock:
@@ -309,6 +367,7 @@ class ConversationRecorder:
             conversation = self._current
             if pending is None or pending["user"] is None or conversation is None:
                 return
+            local_only = conversation_identity(conversation)[0] == "chatgpt"
             messages = conversation["messages"]
             if messages and messages[-1]["id"] == pending["user"]:
                 messages.pop()
@@ -321,7 +380,8 @@ class ConversationRecorder:
                 self._store.delete(conversation["id"])
             except OSError as error:
                 logger.error("Conversa vazia não apagada (%s): %s", conversation["id"], error)
-            self._to_cloud("deleted", conversation["id"])
+            if not local_only:
+                self._to_cloud("deleted", conversation["id"])
         self._on_change()
 
     def event(self, name: str, payload: dict) -> None:
@@ -388,11 +448,13 @@ class ConversationRecorder:
         começa outra. Devolve se havia arquivo; levanta OSError se o disco recusar."""
         with self._lock:
             was_current = bool(self._current and self._current["id"] == conversation_id)
+            conversation = self._current if was_current else self._store.get(conversation_id)
+            local_only = conversation and conversation_identity(conversation)[0] == "chatgpt"
             if was_current:
                 self._pending.clear()
                 self._current = None
             deleted = self._store.delete(conversation_id)
-            if deleted or was_current:
+            if (deleted or was_current) and not local_only:
                 self._to_cloud("deleted", conversation_id)
         self._on_change()
         return deleted
@@ -440,6 +502,8 @@ class ConversationRecorder:
     def _to_cloud(self, method: str, *args) -> None:
         cloud = self.cloud
         if cloud is None:
+            return
+        if method != "deleted" and self._current and conversation_identity(self._current)[0] == "chatgpt":
             return
         try:
             getattr(cloud, method)(*args)

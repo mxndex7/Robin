@@ -518,9 +518,7 @@ def test_api_puxa_ao_aparecer_a_janela_com_intervalo(files, robin_api, events, m
 def test_api_pull_avisa_a_aba_memoria(files, robin_api, events):
     _with_cloud_env(files)
     robin = robin_api()
-    _wait(lambda: robin._last_pull > 0)
-    robin._flush_events()
-    assert events.of("onBrainChanged")  # a lista da aba Memória recarrega depois de puxar
+    events.wait("onBrainChanged")  # a lista da aba Memória recarrega depois de puxar
 
 
 def test_api_avisa_status_da_nuvem(files, robin_api, events):

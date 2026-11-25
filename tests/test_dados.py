@@ -111,7 +111,7 @@ def test_ensure_cria_a_pasta_com_gitignore_sem_sobrescrever(tmp_path):
     datadir.ensure(target)
     assert (target / ".gitignore").read_text(encoding="utf-8").splitlines() == [
         ".env", "mock/", "brain.json", "brain.*.json", ".brain-*.tmp", "sync.json", ".sync-*.tmp", "instancia.json",
-        "conversas/", "sync-conversas.json",
+        "conversas/", "sync-conversas.json", "chatgpt-session.bin", ".chatgpt-*.tmp",
     ]
 
     # Um .gitignore antigo mantém as linhas do usuário e ganha só as que faltam (o cérebro, as conversas).
@@ -119,7 +119,7 @@ def test_ensure_cria_a_pasta_com_gitignore_sem_sobrescrever(tmp_path):
     datadir.ensure(target)
     assert (target / ".gitignore").read_text(encoding="utf-8") == (
         ".env\nmeu-arquivo\nmock/\nbrain.json\nbrain.*.json\n.brain-*.tmp\nsync.json\n.sync-*.tmp\ninstancia.json\n"
-        "conversas/\nsync-conversas.json\n"
+        "conversas/\nsync-conversas.json\nchatgpt-session.bin\n.chatgpt-*.tmp\n"
     )
     datadir.ensure(target)  # nada muda na segunda vez
     assert (target / ".gitignore").read_text(encoding="utf-8").count("brain.json") == 1

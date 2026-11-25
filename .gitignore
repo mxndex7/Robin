@@ -26,3 +26,6 @@ conversas/
 instancia.json
 *.log
 /mock/
+
+/chatgpt-session.bin
+/.chatgpt-*.tmp

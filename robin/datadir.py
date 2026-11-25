@@ -16,7 +16,7 @@ logger = logging.getLogger("robin.datadir")
 # (brain.json, suas cópias, a fila da nuvem em sync.json e os temporários da gravação atômica) e as
 # conversas ficam fora, como o instancia.json (qual Robin está aberto nesta máquina).
 GITIGNORE_LINES = (".env", "mock/", "brain.json", "brain.*.json", ".brain-*.tmp", "sync.json", ".sync-*.tmp",
-                   "instancia.json", "conversas/", "sync-conversas.json")
+                   "instancia.json", "conversas/", "sync-conversas.json", "chatgpt-session.bin", ".chatgpt-*.tmp")
 GITIGNORE = "".join(f"{line}\n" for line in GITIGNORE_LINES)
 
 

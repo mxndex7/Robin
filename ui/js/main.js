@@ -102,15 +102,23 @@ async function init() {
   sidebar.setCloud(state.cloud);
 
   const composer = createComposer({
-    onSubmit: (text) => chat.send(text),
+    onSubmit: (text, files, context) => chat.send(text, files, context),
     onStop: () => chat.stop(),
+    limits: state.attachments,
   });
   const modelPicker = createModelPicker();
-  const chat = createChat({ composer, onModelChanged: (model) => modelPicker.setCurrent(model) });
+  let chat;
+  function applyProvider(next) {
+    if (!next) return;
+    if (next.model) modelPicker.setProvider(next.provider, next.model);
+    composer.setAttachmentContext(next.attachments?.context);
+    if (next.can_regenerate !== undefined) chat?.setCanRegenerate(next.can_regenerate);
+    $("#key-notice").hidden = next.has_key;
+  }
+  applyProvider(state);
+  chat = createChat({ composer, onModelChanged: (model) => modelPicker.setCurrent(model), onProviderChanged: applyProvider });
   const settings = createSettings({
-    onKeyChanged: () => {
-      $("#key-notice").hidden = true;
-    },
+    onProviderChanged: applyProvider,
     onSyncChanged: (enabled) => sidebar.setSyncEnabled(enabled),
     onCloudChanged: (status) => applyCloud(status),
   });

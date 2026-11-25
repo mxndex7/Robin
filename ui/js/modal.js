@@ -12,10 +12,18 @@ import { toast } from "./toast.js";
 
 const DISCONNECT_CONFIRM_MS = 3000;
 
-export function createSettings({ onKeyChanged, onSyncChanged, onCloudChanged }) {
+export function createSettings({ onProviderChanged, onSyncChanged, onCloudChanged }) {
   const overlay = document.getElementById("settings-overlay");
   const modal = document.getElementById("settings-modal");
   const backdrop = overlay.querySelector(".overlay__backdrop");
+  const chatgptSection = document.getElementById("chatgpt-settings");
+  const chatgptHint = document.getElementById("chatgpt-status");
+  const chatgptConnect = document.getElementById("chatgpt-connect");
+  const chatgptNewAccount = document.getElementById("chatgpt-new-account");
+  const chatgptDisconnect = document.getElementById("chatgpt-disconnect");
+  const chatgptProfile = document.getElementById("chatgpt-profile");
+  const chatgptProfileLabel = document.getElementById("chatgpt-profile-label");
+  const providerSelect = document.getElementById("chat-provider");
   const form = document.getElementById("key-form");
   const keyInput = document.getElementById("key-input");
   const keySave = document.getElementById("key-save");
@@ -52,6 +60,81 @@ export function createSettings({ onKeyChanged, onSyncChanged, onCloudChanged }) 
   let savedUrl = "";
   let hasCloudKey = false;
   let disconnectTimer = 0;
+  let chatProviders = {};
+  let chatgptTimer = 0;
+
+  function renderProviders(settings, state) {
+    chatProviders = settings;
+    onProviderChanged?.(state);
+    chatgptSection.hidden = !settings.chatgpt_enabled;
+    if (!settings.chatgpt_enabled) return;
+    const connection = settings.chatgpt || {};
+    chatgptHint.textContent = connection.pending ? "Conclua a conexão no navegador."
+      : connection.message || (connection.connected ? connection.account || "Conectado." : "Nenhuma conta conectada.");
+    chatgptConnect.hidden = Boolean(connection.connected);
+    chatgptConnect.disabled = Boolean(connection.pending);
+    chatgptNewAccount.hidden = !connection.registered || connection.connected || connection.pending;
+    chatgptDisconnect.hidden = !connection.connected;
+    const profile = chatgptProfile.value;
+    const saved = connection.profiles ?? [];
+    chatgptProfile.replaceChildren(...saved.map(({ id, label }) => new Option(label, id)));
+    if (saved.some((item) => item.id === profile)) chatgptProfile.value = profile;
+    chatgptProfileLabel.hidden = chatgptProfile.hidden = saved.length < 2 || connection.connected || connection.pending;
+    providerSelect.options[0].disabled = !settings.key_hint;
+    providerSelect.options[1].disabled = !connection.connected;
+    providerSelect.disabled = providerSelect.options[0].disabled && providerSelect.options[1].disabled;
+    const preferred = settings.preferred_provider === "chatgpt" ? providerSelect.options[1] : providerSelect.options[0];
+    providerSelect.value = providerSelect.disabled ? "" :
+      (preferred.disabled ? (connection.connected ? "chatgpt" : "gemini") : preferred.value);
+  }
+
+  function acceptConnection(result) {
+    renderProviders({ ...chatProviders, chatgpt: result }, result.state);
+    clearTimeout(chatgptTimer);
+    if (result.pending) chatgptTimer = setTimeout(pollChatGPT, 750);
+  }
+
+  async function pollChatGPT() {
+    const result = await call("chatgpt_status").catch(() => null);
+    if (result?.ok) acceptConnection(result);
+    else chatgptHint.textContent = "Não foi possível consultar a conexão. Abra as Configurações novamente.";
+  }
+
+  async function connectChatGPT(newAccount) {
+    chatgptConnect.disabled = true;
+    chatgptNewAccount.disabled = true;
+    const result = await call("begin_chatgpt", newAccount, newAccount ? "" : chatgptProfile.value).catch(() => null);
+    chatgptNewAccount.disabled = false;
+    if (!result?.ok) {
+      chatgptConnect.disabled = false;
+      chatgptHint.textContent = result?.error || "Não foi possível iniciar o login.";
+      return;
+    }
+    acceptConnection(result);
+  }
+
+  chatgptConnect.addEventListener("click", () => connectChatGPT(false));
+  chatgptNewAccount.addEventListener("click", () => connectChatGPT(true));
+  chatgptDisconnect.addEventListener("click", async () => {
+    chatgptDisconnect.disabled = true;
+    const result = await call("disconnect_chatgpt").catch(() => null);
+    chatgptDisconnect.disabled = false;
+    if (result?.ok) acceptConnection(result);
+    else chatgptHint.textContent = result?.error || "Não foi possível desconectar.";
+  });
+
+  providerSelect.addEventListener("change", async () => {
+    const provider = providerSelect.value;
+    providerSelect.disabled = true;
+    const result = await call("set_chat_provider", provider).catch(() => null);
+    if (result?.ok) {
+      renderProviders({ ...chatProviders, preferred_provider: provider }, result.state);
+      if (result.state.provider !== provider) toast("O provedor escolhido vale ao iniciar uma nova conversa.");
+    } else {
+      renderProviders(chatProviders);
+      toast(result?.error || "Não foi possível trocar o provedor.", { tone: "error" });
+    }
+  });
 
   function setKeyHint(hint) {
     keyHint.textContent = hint ? `Chave atual: ${hint}` : "Nenhuma chave configurada.";
@@ -148,6 +231,11 @@ export function createSettings({ onKeyChanged, onSyncChanged, onCloudChanged }) 
   async function refresh() {
     const [settings, state] = await Promise.all([call("get_settings"), call("get_state")]);
     setKeyHint(settings.key_hint);
+    renderProviders(settings, state);
+    if (settings.chatgpt?.pending) {
+      clearTimeout(chatgptTimer);
+      chatgptTimer = setTimeout(pollChatGPT, 750);
+    }
     setCloud(settings);
     setGit(settings);
     setDataDir(settings.data_dir);
@@ -180,6 +268,7 @@ export function createSettings({ onKeyChanged, onSyncChanged, onCloudChanged }) 
     });
     keyInput.focus();
     await refresh();
+    if (close && !chatProviders.key_hint && !chatgptSection.hidden && !chatgptConnect.hidden) chatgptConnect.focus();
   }
 
   form.addEventListener("submit", async (event) => {
@@ -201,7 +290,7 @@ export function createSettings({ onKeyChanged, onSyncChanged, onCloudChanged }) 
     }
     keyInput.value = "";
     setKeyHint(result.key_hint);
-    onKeyChanged?.();
+    renderProviders({ ...chatProviders, key_hint: result.key_hint }, result.state || { has_key: true });
     toast("API Key salva", { iconName: "key" });
   });
 

@@ -134,7 +134,9 @@ def _new_client(api_key: str) -> genai.Client:
 class _Generation:
     """Estado de uma resposta em andamento."""
 
-    def __init__(self, gen_id: int, user_text: str, base_history: list, turn: Turn, prior: list[ToolResult]):
+    def __init__(self, gen_id: int, user_text: str, base_history: list, turn: Turn, prior: list[ToolResult],
+                 memory_read_only: bool = False):
+        self.memory_read_only = memory_read_only
         self.id = gen_id
         self.user_text = user_text
         self.chat: Any = None
@@ -179,7 +181,20 @@ class _Generation:
             return chunk
 
 
+_ATTACHMENT_MEMORY_TOOLS = MUTATING | {"buscar_memoria"}
+
+
 class GeminiService:
+    _fallback_model = FALLBACK_MODEL
+    _provider_name = "Gemini"
+    _no_connection = "Configure a API Key do Gemini para começar."
+
+    def _make_client(self, api_key):
+        return _new_client(api_key)
+
+    def _stream_error(self, error, model):
+        return _translate_error(error, model)
+
     def __init__(
         self,
         emit: Emit,
@@ -190,6 +205,7 @@ class GeminiService:
         core: Optional[Callable[[], str]] = None,
         rate_limit: Optional[int] = None,
         conversations: Any = None,
+        manage_embeddings: bool = True,
     ):
         self._emit = emit
         # Conversas guardadas (conversations.ConversationRecorder): trechos das anteriores no
@@ -212,11 +228,13 @@ class GeminiService:
         self._last_user_text: Optional[str] = None
         self._last_turn_recorded = False
         self._pending_rebuild = False
+        self._context_readonly = False
         # Modelos que deram 429 com "limit: 0" nesta execução (o seletor os marca até reabrir o app).
         self._no_quota: set[str] = set()
         # Cérebro: sem store, a sessão não tem ferramentas. O store usa este serviço para os embeddings.
         self._store: Optional[MemoryStore] = None
         self._tools: Optional[MemoryTools] = None
+        self._manage_embeddings = manage_embeddings
         self._attach_store(store)
         self._session = uuid.uuid4().hex[:12]
         self._turn_number = 0
@@ -237,6 +255,10 @@ class GeminiService:
         return self._active is not None
 
     @property
+    def has_attachment_context(self) -> bool:
+        return self._context_readonly
+
+    @property
     def no_quota_models(self) -> list[str]:
         return sorted(self._no_quota)
 
@@ -246,15 +268,21 @@ class GeminiService:
         """(Re)cria o cliente. O histórico da conversa atual é mantido."""
         with self._lock:
             history = self._history()
-            self._client = _new_client(api_key) if api_key else None
+            self._client = self._make_client(api_key) if api_key else None
             self._chat = self._new_chat(history) if self._client else None
         self._embeddings_changed()
 
     def _attach_store(self, store: Optional[MemoryStore]) -> None:
         self._store = store
         self._tools = MemoryTools(store, self._conversations) if store is not None else None
-        if store is not None:
+        if store is not None and self._manage_embeddings:
             store.embed = self.embed
+
+    def set_embeddings_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            self._manage_embeddings = enabled
+            if self._store is not None:
+                self._store.embed = self.embed if enabled else None
 
     def set_store(self, store: Optional[MemoryStore]) -> None:
         """Troca o armazenamento (ligar ou desligar o Supabase). Vale a partir do próximo turno;
@@ -266,7 +294,7 @@ class GeminiService:
 
     def _embeddings_changed(self) -> None:
         """Chave nova: o embedding volta a ser tentado e os itens sem vetor são preenchidos."""
-        if self._store is not None and self._client:
+        if self._manage_embeddings and self._store is not None and self._client:
             self._store.reset_embed_cooldown()
             self.schedule_backfill()
 
@@ -292,6 +320,9 @@ class GeminiService:
                    core_ms, timing.ms(start) - core_ms, len(instruction))
         if generation is not None and generation.prior:
             instruction += _prior_actions_note(generation.prior)
+        memory_read_only = generation.memory_read_only if generation is not None else self._context_readonly
+        if memory_read_only:
+            instruction += "\nNesta sessão com anexos, apenas consulte a memória. Informe que ela está em modo de leitura se pedirem alterações."
         tools_off = generation is not None and generation.rounds >= MAX_TOOL_ROUNDS
         # As buscas só quando algo ficou de fora do prompt (ou se a conversa já as usou: o histórico
         # tem chamadas delas).
@@ -300,7 +331,7 @@ class GeminiService:
         return self._client.chats.create(
             model=self._model,
             config=_generate_config(self._model, instruction, self._tools is not None, tools_off, search,
-                                    search_conversations),
+                                    search_conversations, memory_read_only),
             history=history,
         )
 
@@ -356,6 +387,7 @@ class GeminiService:
                 self._active.cancel.set()
                 self._active = None
             self._pending_rebuild = False
+            self._context_readonly = False
             users = [text for role, text in messages if role == "user"]
             self._last_user_text = users[-1] if users else None
             self._last_turn_recorded = bool(messages) and messages[-1][0] == "model"
@@ -365,16 +397,16 @@ class GeminiService:
 
     # ---------- geração ----------
 
-    def send(self, text: str, gen_id: int) -> None:
-        self._start(text, gen_id, new_turn=True)
+    def send(self, text: str, gen_id: int, *, memory_read_only: bool = False) -> None:
+        self._start(text, gen_id, new_turn=True, memory_read_only=memory_read_only)
 
-    def _start(self, text: str, gen_id: int, new_turn: bool) -> None:
+    def _start(self, text: str, gen_id: int, new_turn: bool, *, memory_read_only: bool = False) -> None:
         timing.set_tag(f"g{gen_id}")
         start = time.monotonic()
         timing.log("envio recebido (%d caracteres)", len(text))
         with timing.wait_lock(self._lock, "do GeminiService"):
             if not self._client:
-                raise GeminiError("no_key", "Configure a API Key do Gemini para começar.")
+                raise GeminiError("no_key", self._no_connection)
             if self._active:
                 raise GeminiError("busy", "Aguarde a resposta atual ou pare a geração.")
             self._restore_model()
@@ -386,9 +418,11 @@ class GeminiService:
                 prior = []
             else:
                 prior = list(self._turn.actions.values())
-            generation = _Generation(gen_id, text, self._history(), self._turn, prior)
+            generation = _Generation(gen_id, text, self._history(), self._turn, prior,
+                                     self._context_readonly or memory_read_only)
             # Sessão nova a cada turno: a hora no system_instruction é a deste envio.
             generation.chat = self._new_chat(generation.base_history, generation)
+            self._context_readonly = generation.memory_read_only
             self._chat = generation.chat
             self._active = generation
             self._last_user_text = text
@@ -516,7 +550,7 @@ class GeminiService:
             try:
                 self._stream_into(generation)
             except Exception as exc:  # noqa: BLE001 - erros do SDK/rede são traduzidos aqui
-                error = _translate_error(exc, model)
+                error = self._stream_error(exc, model)
             else:
                 if generation.cancel.is_set() or not generation.calls:
                     return None
@@ -534,9 +568,9 @@ class GeminiService:
             if generation.text[generation.round_start:]:
                 return error  # o texto já está na tela: reenviar duplicaria a resposta
 
-            if error.code == "model_unavailable" and self._model != FALLBACK_MODEL:
+            if error.code == "model_unavailable" and self._fallback_model and self._model != self._fallback_model:
                 resumed = self._use_fallback(generation, persist=True)
-            elif error.daily and self._model != FALLBACK_MODEL:
+            elif error.daily and self._fallback_model and self._model != self._fallback_model:
                 # Cota diária do modelo acabou: nova tentativa não adianta; a reserva vale até ela voltar.
                 resumed = self._use_fallback(generation, persist=False, cause="daily_quota", until=error.retry_after)
             elif error.daily:
@@ -548,7 +582,7 @@ class GeminiService:
                     delay = error.retry_after  # o 429 por minuto diz quando a vaga volta
                 self._emit("onRetry", {"gen_id": generation.id, "code": error.code})
                 resumed = not generation.cancel.wait(delay) and self._restart(generation)
-            elif error.code in _TRANSIENT_CODES and self._model != FALLBACK_MODEL:
+            elif error.code in _TRANSIENT_CODES and self._fallback_model and self._model != self._fallback_model:
                 resumed = self._use_fallback(generation, persist=False)
             else:
                 return error
@@ -648,6 +682,8 @@ class GeminiService:
         start = time.monotonic()
         if self._tools is None:
             result = ToolResult({"ok": False, "erro": "Ferramentas indisponíveis."}, ok=False)
+        elif generation.memory_read_only and name in _ATTACHMENT_MEMORY_TOOLS:
+            result = ToolResult({"ok": False, "erro": "Use apenas a memória já disponível no contexto enquanto consulta anexos."}, ok=False)
         else:
             result = self._tools.call(name, dict(args or {}), generation.turn, self._known_ids)
         timing.log("ferramenta %s: %dms (%s)", name, timing.ms(start), "ok" if result.ok else "recusada")
@@ -657,6 +693,8 @@ class GeminiService:
         return result
 
     def schedule_backfill(self) -> None:
+        if not self._manage_embeddings:
+            return
         """Gera em segundo plano os embeddings que faltam (o store ignora se já houver um rodando)."""
         if self._store is not None and self._client:
             threading.Thread(target=self._backfill, daemon=True).start()
@@ -693,7 +731,7 @@ class GeminiService:
         delay = self._limiter.delay(self._model)
         if not delay:
             return True
-        if delay > RATE_WAIT_MAX and self._model != FALLBACK_MODEL and not self._limiter.delay(FALLBACK_MODEL):
+        if delay > RATE_WAIT_MAX and self._fallback_model and self._model != self._fallback_model and not self._limiter.delay(self._fallback_model):
             return self._use_fallback(generation, persist=False, cause="rate_limit")
         timing.log("limitador: %.1fs até a vaga de %s", delay, self._model)
         self._emit("onWaiting", {"gen_id": generation.id, "seconds": math.ceil(delay)})
@@ -704,13 +742,13 @@ class GeminiService:
         """persist: modelo inexistente para a chave (grava no .env). Senão, troca temporária: vale
         FALLBACK_EXPIRY_SECONDS (ou até a cota diária voltar, se for mais) e depois volta sozinha."""
         previous = self._model
-        if not self._restart(generation, FALLBACK_MODEL):
+        if not self._restart(generation, self._fallback_model):
             return False
-        payload = {"model": FALLBACK_MODEL, "previous": previous, "reason": "fallback" if persist else "temporary"}
+        payload = {"model": self._fallback_model, "previous": previous, "reason": "fallback" if persist else "temporary"}
         if persist:
             if self._save_model:
                 try:
-                    self._save_model(FALLBACK_MODEL)
+                    self._save_model(self._fallback_model)
                 except OSError:
                     logger.warning("Não foi possível gravar o modelo de reserva no .env", exc_info=True)
         else:
@@ -719,7 +757,7 @@ class GeminiService:
                 self._fallback_from = self._fallback_from or previous
                 self._fallback_until = time.monotonic() + expires
             payload.update(cause=cause, expires_in=round(expires))
-            logger.info("Troca temporária para %s (%s) por %ds", FALLBACK_MODEL, cause, round(expires))
+            logger.info("Troca temporária para %s (%s) por %ds", self._fallback_model, cause, round(expires))
         self._emit("onModelChanged", payload)
         return True
 
@@ -733,7 +771,7 @@ class GeminiService:
         generation.requests += 1
         number, model = generation.requests, self._model
         self._limiter.record(model)
-        timing.log("pedido %d ao Gemini (%s, rodada %d) enviado", number, model, generation.rounds)
+        timing.log("pedido %d ao %s (%s, rodada %d) enviado", number, self._provider_name, model, generation.rounds)
         started = time.monotonic()
         first = None
         threading.Thread(target=_pump, args=(generation.chat, generation.message, chunks, abandon), daemon=True).start()
@@ -825,6 +863,8 @@ def validate_api_key(api_key: str) -> Optional[GeminiError]:
 
 def _pump(chat: Any, message: Any, chunks: queue.Queue, abandon: threading.Event) -> None:
     """Lê o stream (na thread própria) e repassa cada pedaço pela fila."""
+    if abandon.is_set():
+        return
     try:
         stream = chat.send_message_stream(message)
         try:
@@ -921,7 +961,8 @@ def _prior_actions_note(actions: list[ToolResult]) -> str:
 
 
 def _generate_config(model: str, system_instruction: str, tools: bool = False, tools_off: bool = False,
-                     search: bool = False, search_conversations: bool = False) -> types.GenerateContentConfig:
+                     search: bool = False, search_conversations: bool = False,
+                     memory_read_only: bool = False) -> types.GenerateContentConfig:
     """Sem temperature (ver config.py). Os resumos do raciocínio vêm no stream: a interface mostra
     "Raciocinando…" e o watchdog conta esses pedaços como atividade. Ferramentas sem o automatic
     function calling do SDK: o laço é o deste módulo. search / search_conversations: incluem
@@ -930,8 +971,11 @@ def _generate_config(model: str, system_instruction: str, tools: bool = False, t
         system_instruction=system_instruction,
         thinking_config=types.ThinkingConfig(include_thoughts=True, thinking_level=_thinking_level(model)),
     )
-    if tools:
-        config.tools = [types.Tool(function_declarations=declarations(search, search_conversations))]
+    functions = declarations(search, search_conversations) if tools else []
+    if memory_read_only:
+        functions = [function for function in functions if function.name not in _ATTACHMENT_MEMORY_TOOLS]
+    if functions:
+        config.tools = [types.Tool(function_declarations=functions)]
         config.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=True)
         if tools_off:
             config.tool_config = types.ToolConfig(

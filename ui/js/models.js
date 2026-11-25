@@ -15,6 +15,7 @@ export function createModelPicker() {
   const main = document.getElementById("main");
 
   let current = label.textContent;
+  let provider = "";
   let models = [];
   let noQuota = new Set();
   let close = null;
@@ -77,7 +78,9 @@ export function createModelPicker() {
       },
     });
 
+    const requestedProvider = provider;
     const result = await call("get_models");
+    if (requestedProvider !== provider) return;
     models = result?.models?.length ? result.models : [current];
     noQuota = new Set(result?.no_quota ?? []);
     current = result?.current || current;
@@ -100,7 +103,7 @@ export function createModelPicker() {
 
   function setCurrent(name) {
     current = name;
-    label.textContent = name;
+    label.textContent = provider ? `${provider === "chatgpt" ? "ChatGPT" : "Gemini"} · ${name}` : name;
   }
 
   trigger.addEventListener("click", () => (close ? close() : open()));
@@ -124,5 +127,14 @@ export function createModelPicker() {
     open,
     /** Atualiza o rótulo sem toast (ex.: fallback automático do Python). */
     setCurrent,
+    setProvider(nextProvider, name) {
+      if (nextProvider !== provider) {
+        close?.();
+        models = [];
+        noQuota.clear();
+      }
+      provider = nextProvider;
+      setCurrent(name);
+    },
   };
 }

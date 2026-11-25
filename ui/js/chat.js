@@ -168,7 +168,7 @@ function setThinkingLabel(view, label) {
   setStatus("thinking", label);
 }
 
-export function createChat({ composer, onModelChanged }) {
+export function createChat({ composer, onModelChanged, onProviderChanged }) {
   const main = document.getElementById("main");
   const conversation = document.getElementById("conversation");
   const list = document.getElementById("messages");
@@ -177,6 +177,7 @@ export function createChat({ composer, onModelChanged }) {
   const toBottom = document.getElementById("scroll-bottom");
 
   let generating = false;
+  let regenerationAllowed = true;
   let current = null; // { genId, view } da geração exibida
   let pendingView = null; // view criada enquanto o gen_id ainda não chegou
   let starting = null; // chamada send/regenerate em andamento
@@ -224,9 +225,23 @@ export function createChat({ composer, onModelChanged }) {
 
   // ---------- mensagens ----------
 
-  function appendUser(text) {
+  function appendUser(text, files = []) {
     const message = el("div", "message message--user");
-    message.append(el("div", "message__bubble", text));
+    const bubble = el("div", "message__bubble");
+    if (files.length) {
+      const fileList = el("ul", "message__attachments file-chips");
+      fileList.setAttribute("aria-label", "Anexos enviados");
+      for (const name of files) {
+        const chip = el("li", "file-chip");
+        const label = el("span", "file-chip__name", name);
+        label.title = name;
+        chip.append(icon("paperclip", "icon icon--sm"), label);
+        fileList.append(chip);
+      }
+      bubble.append(fileList);
+    }
+    bubble.append(document.createTextNode(text));
+    message.append(bubble);
     list.append(message);
     return message;
   }
@@ -273,7 +288,7 @@ export function createChat({ composer, onModelChanged }) {
     list.insertBefore(note, before);
   }
 
-  function appendError({ code, message, error, detail }) {
+  function appendError({ code, message, error, detail }, allowRetry = true) {
     const card = el("div", "message message--error");
     card.setAttribute("role", "alert");
     const text = el("div", "error-card__text");
@@ -295,7 +310,8 @@ export function createChat({ composer, onModelChanged }) {
       if (code === "no_key") window.dispatchEvent(new CustomEvent("robin:configure"));
       else regenerate();
     });
-    card.append(icon(ERROR_ICONS[code] || "alert", "icon error-card__icon"), text, action);
+    card.append(icon(ERROR_ICONS[code] || "alert", "icon error-card__icon"), text);
+    if (allowRetry || code === "no_key") card.append(action);
     list.append(card);
     stickToEnd();
   }
@@ -330,15 +346,21 @@ export function createChat({ composer, onModelChanged }) {
   function renderStored(messages) {
     for (const stored of messages) {
       if (stored.role === "user") {
-        appendUser(stored.text);
+        const files = stored.actions?.attachments;
+        appendUser(stored.text, Array.isArray(files) ? files : []);
         continue;
       }
       if (stored.text || stored.status !== "error") appendStoredAssistant(stored);
-      if (stored.status === "error") appendError({ code: stored.error?.code, message: stored.error?.message });
+      if (stored.status === "error") appendError({ code: stored.error?.code, message: stored.error?.message }, regenerationAllowed);
     }
     // "Tentar novamente" e regenerar só valem para o último turno.
     for (const card of list.querySelectorAll(".message--error")) card.classList.toggle("is-stale", card !== list.lastElementChild);
-    [...list.querySelectorAll(".message--assistant")].at(-1)?.classList.add("is-latest");
+    const latest = [...list.querySelectorAll(".message--assistant")].at(-1);
+    latest?.classList.add("is-latest");
+    if (!regenerationAllowed) {
+      latest?.querySelector(".regenerate-btn")?.remove();
+      list.append(el("p", "message message__status", "Para usar os arquivos novamente, anexe-os em uma nova mensagem."));
+    }
   }
 
   // Remove tudo depois da última mensagem do usuário (resposta anterior, erros, avisos).
@@ -462,29 +484,32 @@ export function createChat({ composer, onModelChanged }) {
     return result;
   }
 
-  async function send(text) {
+  async function send(text, files = [], context = "") {
     if (generating) return;
-    if (clearing) await clearing; // a sessão nova precisa existir antes do envio
+    if (clearing) {
+      await clearing;
+      if (files.length) return; // anexos de outra conversa não acompanham a troca de contexto
+    }
+    if (generating) return;
     empty.hidden = true;
-    // "Tentar novamente" de turnos anteriores regeneraria o turno errado.
     for (const card of list.querySelectorAll(".message--error")) card.classList.add("is-stale");
-    const userMessage = appendUser(text);
+    const userMessage = appendUser(text || "Analise os arquivos anexados.", files.map((file) => file.name));
     composer.clear();
 
-    const result = await startGeneration(() => call("send_message", text));
-    if (result?.ok) return;
-
-    if (result?.code === "no_key" || result?.code === "empty") {
-      // Nada foi enviado: devolve o texto ao composer.
-      userMessage.remove();
-      composer.setText(text);
-      if (!list.querySelector(".message")) empty.hidden = false;
+    const payload = files.map(({ name, content }) => ({ name, content }));
+    const result = await startGeneration(() => call("send_message", text, payload, context));
+    if (result?.ok) {
+      regenerationAllowed = true;
+      return;
     }
-    appendError(result || {});
+
+    userMessage.remove();
+    composer.restoreDraft(text, result?.code === "attachment_context" ? [] : files, context);
+    appendError(result || {}, false);
   }
 
   async function regenerate() {
-    if (generating) return;
+    if (generating || !regenerationAllowed) return;
     clearAfterLastUser();
     const result = await startGeneration(() => call("regenerate"));
     if (!result?.ok) appendError(result || {});
@@ -551,7 +576,10 @@ export function createChat({ composer, onModelChanged }) {
   /** Conversa nova: a atual continua guardada (aba Conversas). */
   async function newConversation() {
     await detach();
+    composer.clearFiles();
+    regenerationAllowed = true;
     clearing = call("new_conversation")
+      .then((result) => onProviderChanged?.(result?.state))
       .catch(() => null)
       .finally(() => {
         clearing = null;
@@ -575,6 +603,9 @@ export function createChat({ composer, onModelChanged }) {
       return false;
     }
     await detach(); // o Python já interrompeu a geração da conversa anterior
+    onProviderChanged?.(result.state);
+    composer.clearFiles();
+    regenerationAllowed = result.can_regenerate !== false;
     await swapMessages(() => renderStored(result.conversation?.messages ?? []));
     return true;
   }
@@ -601,6 +632,11 @@ export function createChat({ composer, onModelChanged }) {
     regenerate,
     newConversation,
     openConversation,
+    setCanRegenerate(allowed) {
+      regenerationAllowed = allowed;
+      const button = list.querySelector(".message--assistant.is-latest .regenerate-btn");
+      if (button) button.disabled = !allowed;
+    },
     get generating() {
       return generating;
     },
@@ -608,7 +644,7 @@ export function createChat({ composer, onModelChanged }) {
       return Boolean(list.querySelector(".message"));
     },
     get canRegenerate() {
-      return !generating && Boolean(list.querySelector(".message--user"));
+      return regenerationAllowed && !generating && Boolean(list.querySelector(".message--user"));
     },
   };
 }
