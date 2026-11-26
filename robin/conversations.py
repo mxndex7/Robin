@@ -327,7 +327,7 @@ class ConversationRecorder:
     # ---------- geração ----------
 
     def begin(self, gen_id: int, text: str, identity: tuple[str, str] = ("gemini", ""),
-              attachments: Optional[list[str]] = None) -> str:
+              attachments: Optional[list[str]] = None, folder: bool = False) -> str:
         """Grava a mensagem do usuário antes da resposta e devolve o ID do turno."""
         with self._lock:
             if self._current is None:
@@ -340,6 +340,8 @@ class ConversationRecorder:
                 message["actions"] = {"provider": provider, "profile": profile}
             if attachments:
                 message.setdefault("actions", {})["attachments"] = attachments
+            if folder:
+                message.setdefault("actions", {})["folder"] = True
             self._current["messages"].append(message)
             self._pending[gen_id] = {"text": "", "actions": [], "user": message["id"], "regenerate": False}
             self._save()
@@ -347,14 +349,14 @@ class ConversationRecorder:
             return message["id"]
 
     @property
-    def last_attachment_turn(self) -> Optional[str]:
-        """ID do último turno quando sua mensagem contém metadados de anexos."""
+    def last_external_context_turn(self) -> Optional[str]:
+        """ID do último turno quando sua mensagem usou anexos ou uma pasta."""
         with self._lock:
             if not self._current:
                 return None
             message = next((msg for msg in reversed(self._current["messages"]) if msg["role"] == USER), {})
             meta = message.get("actions")
-            return message["id"] if isinstance(meta, dict) and meta.get("attachments") else None
+            return message["id"] if isinstance(meta, dict) and (meta.get("attachments") or meta.get("folder")) else None
 
     def begin_regenerate(self, gen_id: int) -> None:
         with self._lock:

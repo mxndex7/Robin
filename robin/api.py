@@ -23,6 +23,7 @@ from .config import (
     CONVERSATION_SYNC_FILE,
     CONVERSATIONS_DIR,
     DATA_DIR,
+    DATA_ROOT,
     DEBUG,
     DEFAULT_MODEL,
     DONE_RETENTION_DAYS,
@@ -40,6 +41,7 @@ from .config import (
     PULL_MIN_INTERVAL,
     SYNC_FILE,
     THEMES,
+    WEBVIEW_DATA_DIR,
     palette_preference,
     read_env,
     theme_preference,
@@ -47,6 +49,7 @@ from .config import (
 )
 from . import cloud_mock, timing
 from .attachments import attachment_limits, message_with_attachments, text_attachments
+from .project_folder import ProjectFolder
 from .brain import BrainError, LocalStore, StaleError
 from .build import current_build
 from .chatgpt import ChatGPTService, DEFAULT_CHATGPT_MODEL
@@ -103,6 +106,8 @@ class RobinAPI:
         self._chat_lock = threading.RLock()
         self._attachment_turn: Optional[str] = None
         self._attachment_scope = secrets.token_hex(16)
+        self._folder: Optional[tuple[str, str, ProjectFolder]] = None
+        self._last_folder_id = ""
         self._chatgpt_account = ChatGPTAccount(DATA_DIR / SESSION_FILE)
         self._chatgpt_model = env.get(ENV_CHATGPT_MODEL) or DEFAULT_CHATGPT_MODEL
         self._chatgpt = None
@@ -156,6 +161,18 @@ class RobinAPI:
         provider, profile = self._identity()
         return hashlib.sha256(f"{self._attachment_scope}:{provider}:{profile}".encode()).hexdigest()
 
+    def _rotate_attachment_scope(self) -> None:
+        self._attachment_scope = secrets.token_hex(16)
+        self._folder = None
+        self._last_folder_id = ""
+        self._attachment_turn = None
+
+    def _selected_folder(self):
+        folder = self._folder
+        if folder is not None and folder[1] == self._attachment_context():
+            return folder
+        return None
+
     def _chat_connection_error(self) -> Optional[dict]:
         if not self._provider_ready(self._provider):
             return _error("no_key", "Conecte o provedor desta conversa nas Configurações.")
@@ -180,7 +197,7 @@ class RobinAPI:
                 conversations=ConversationContext(self._recorder, "chatgpt", self._chatgpt_account.profile_tag),
             )
         if self._provider != provider:
-            self._attachment_scope = secrets.token_hex(16)
+            self._rotate_attachment_scope()
         self._provider = provider
 
     def _set_chat_store(self, store) -> None:
@@ -307,8 +324,7 @@ class RobinAPI:
             result = self._recorder.apply_remote(heads, rows)
             if result[2]:
                 self._service.clear()
-                self._attachment_turn = None
-                self._attachment_scope = secrets.token_hex(16)
+                self._rotate_attachment_scope()
             return result
 
     def _start_sync(self, initial: bool = False) -> None:
@@ -468,12 +484,15 @@ class RobinAPI:
     # ---------- estado ----------
 
     def get_state(self) -> dict:
+        folder = self._selected_folder()
         return {
             "app": APP_NAME,
             "version": APP_VERSION,
             "model": self._service.model,
             "provider": self._provider,
             "attachments": {**attachment_limits(), "context": self._attachment_context()},
+            "project_folder": {"id": folder[0], "name": folder[2].name} if folder else None,
+            "folder_picker": self._window is not None and os.name == "nt",
             "has_key": self._chat_connection_error() is None,
             "can_regenerate": self._can_regenerate(),
             "mock": self._mock,
@@ -485,13 +504,48 @@ class RobinAPI:
 
     # ---------- chat ----------
 
-    def send_message(self, text: str, attachments=None, attachment_context: str = "") -> dict:
+    def pick_chat_folder(self, attachment_context: str) -> dict:
+        from webview import FileDialog
+
+        with self._chat_lock:
+            if self._window is None or os.name != "nt":
+                return _error("unavailable", "O seletor de pasta está disponível no app do Windows.")
+            if self._service.is_generating:
+                return _error("busy", "Aguarde a resposta atual ou pare a geração.")
+            if attachment_context != self._attachment_context():
+                return _error("folder_context", "A conversa ou o provedor mudou. Escolha a pasta novamente.")
+        try:
+            paths = self._window.create_file_dialog(FileDialog.FOLDER, allow_multiple=False)
+            folder = ProjectFolder(paths[0], protected=(DATA_ROOT, DATA_DIR, WEBVIEW_DATA_DIR)) if paths else None
+        except (OSError, ValueError):
+            return _error("folder", "Não foi possível abrir essa pasta local para leitura.")
+        with self._chat_lock:
+            if attachment_context != self._attachment_context() or self._service.is_generating:
+                return _error("folder_context", "O contexto mudou. Escolha a pasta novamente.")
+            if folder is not None:
+                self._folder = (secrets.token_hex(16), attachment_context, folder)
+            return {"ok": True, "state": self.get_state()}
+
+    def remove_chat_folder(self, folder_id: str) -> dict:
+        with self._chat_lock:
+            if self._service.is_generating:
+                return _error("busy", "Aguarde a resposta atual ou pare a geração.")
+            folder = self._selected_folder()
+            if folder and folder[0] == folder_id:
+                self._folder = None
+            return {"ok": True, "state": self.get_state()}
+
+    def send_message(self, text: str, attachments=None, attachment_context: str = "", folder_id: str = "") -> dict:
         with self._chat_lock:
             if not isinstance(text, str):
                 return _error("empty", "Mensagem inválida.")
             text = text.strip()
             if attachments and attachment_context != self._attachment_context():
                 return _error("attachment_context", "A conversa ou o provedor mudou. Selecione os arquivos novamente.")
+            selection = self._selected_folder()
+            if folder_id and (not selection or folder_id != selection[0] or attachment_context != selection[1]):
+                return _error("folder_context", "A pasta não está disponível nesta conversa. Escolha a pasta novamente.")
+            folder = selection[2] if folder_id else None
             try:
                 files = text_attachments(attachments)
             except ValueError as error:
@@ -507,9 +561,10 @@ class RobinAPI:
             gen_id = next(self._gen_ids)
             # Antes do envio: os eventos da geração podem chegar antes de send() voltar.
             turn = self._recorder.begin(gen_id, text, identity=self._identity(),
-                                        attachments=[file["name"] for file in files])
+                                        attachments=[file["name"] for file in files], folder=folder is not None)
             try:
-                self._service.send(message_with_attachments(text, files), gen_id, memory_read_only=bool(files))
+                self._service.send(message_with_attachments(text, files), gen_id,
+                                   memory_read_only=bool(files), folder=folder)
             except GeminiError as error:
                 self._recorder.abort(gen_id)
                 return _error(error.code, error.message)
@@ -517,7 +572,8 @@ class RobinAPI:
                 self._recorder.abort(gen_id)
                 logger.exception("send_message falhou")
                 return _error("internal", f"Falha interna ao enviar: {type(error).__name__}. Detalhes no robin.log.")
-            self._attachment_turn = turn if files else None
+            self._attachment_turn = turn if files or folder else None
+            self._last_folder_id = folder_id
             return {"ok": True, "gen_id": gen_id}
 
     def stop_generation(self) -> dict:
@@ -525,13 +581,15 @@ class RobinAPI:
             return {"ok": self._service.stop()}
 
     def _can_regenerate(self) -> bool:
-        attachment_turn = self._recorder.last_attachment_turn
-        return not attachment_turn or attachment_turn == self._attachment_turn
+        turn = self._recorder.last_external_context_turn
+        folder = self._selected_folder()
+        return not turn or (turn == self._attachment_turn
+                            and (not self._last_folder_id or bool(folder and folder[0] == self._last_folder_id)))
 
     def regenerate(self) -> dict:
         with self._chat_lock:
             if not self._can_regenerate():
-                return _error("reattach", "Os anexos anteriores ficaram fora do histórico. Anexe os arquivos em uma nova mensagem.")
+                return _error("reattach", "Selecione os anexos ou a pasta e envie uma nova mensagem.")
             if error := self._chat_connection_error():
                 return error
             if self._service.is_generating:
@@ -539,7 +597,8 @@ class RobinAPI:
             gen_id = next(self._gen_ids)
             self._recorder.begin_regenerate(gen_id)
             try:
-                self._service.regenerate(gen_id)
+                folder = self._selected_folder()
+                self._service.regenerate(gen_id, folder=folder[2] if self._last_folder_id and folder else None)
             except GeminiError as error:
                 self._recorder.abort(gen_id)
                 return _error(error.code, error.message)
@@ -563,8 +622,7 @@ class RobinAPI:
         with self._chat_lock:
             self._service.clear()
             self._recorder.new()
-            self._attachment_turn = None
-            self._attachment_scope = secrets.token_hex(16)
+            self._rotate_attachment_scope()
             self._select_provider(self._default_provider())
             return {"ok": True, "state": self.get_state()}
 
@@ -582,10 +640,9 @@ class RobinAPI:
             self._select_provider(conversation_identity(conversation)[0])
             self._service.load_history(history_for_session(conversation, MAX_REOPEN_HISTORY_CHARS))
             self._recorder.open(conversation)
-            self._attachment_turn = None
-            self._attachment_scope = secrets.token_hex(16)
+            self._rotate_attachment_scope()
             return {"ok": True, "conversation": conversation, "state": self.get_state(),
-                    "can_regenerate": self._recorder.last_attachment_turn is None}
+                    "can_regenerate": self._can_regenerate()}
 
     def delete_conversation(self, conversation_id: str) -> dict:
         """Apaga do PC (e, com a nuvem, dos outros PCs). Se for a atual, a conversa recomeça vazia."""
@@ -594,8 +651,7 @@ class RobinAPI:
             was_current = conversation_id == self._recorder.current_id
             if was_current:
                 self._service.clear()
-                self._attachment_turn = None
-                self._attachment_scope = secrets.token_hex(16)
+                self._rotate_attachment_scope()
             try:
                 deleted = self._recorder.delete(conversation_id)
             except OSError as error:
@@ -688,11 +744,10 @@ class RobinAPI:
             self._api_key = key
             self._gemini.configure(key)
             if changed and self._provider == "gemini":
-                self._attachment_scope = secrets.token_hex(16)
+                self._rotate_attachment_scope()
                 if self._gemini.has_attachment_context:
                     current = self._conversations.get(self._recorder.current_id)
                     self._gemini.load_history(history_for_session(current, MAX_REOPEN_HISTORY_CHARS) if current else [])
-                    self._attachment_turn = None
             if self._recorder.current_id is None:
                 self._select_provider(self._default_provider())
             return {"ok": True, "key_hint": _key_hint(key), "state": self.get_state()}

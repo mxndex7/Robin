@@ -185,3 +185,49 @@ def test_robin_chatgpt_sem_gemini_usa_memoria_e_historico_proprios(files, events
     assert not (files.conversations / f"{saved_id}.json").exists()
     assert robin.delete_conversation(saved_id)["ok"]
     assert not cloud_events
+
+
+def test_chatgpt_consulta_pasta_com_ferramenta_do_turno(files, events, monkeypatch, tmp_path):
+    from conftest import FakeWindow
+    from webview import FileDialog
+
+    project = tmp_path / "projeto"
+    project.mkdir()
+    (project / "fonte.py").write_text("MARCADOR-ARQUIVO-LOCAL", encoding="utf-8")
+    account = chatgpt_auth.ChatGPTAccount(files.dir / chatgpt_auth.SESSION_FILE)
+    account._save(account._with_tokens({"client_id": "oaiapp_robin_test", "subject": "test"}, _tokens()))
+    packets = []
+
+    @contextmanager
+    def stream(_method, _url, *, json, **_options):
+        packets.append(json)
+        if len(packets) == 1:
+            yield _SSE({"type": "response.completed", "response": {"output": [
+                {"type": "function_call", "call_id": "pasta_1", "name": "ler_arquivo_da_pasta",
+                 "namespace": chatgpt.MEMORY_NAMESPACE, "arguments": '{"caminho":"fonte.py"}'},
+            ]}})
+        else:
+            yield _SSE({"type": "response.output_text.delta", "delta": "Arquivo consultado."},
+                       {"type": "response.completed", "response": {"output": []}})
+
+    def pick(mode, *, allow_multiple):
+        assert mode == FileDialog.FOLDER and not allow_multiple
+        return (str(project),)
+
+    monkeypatch.setattr(chatgpt.httpx, "stream", stream)
+    robin = api.RobinAPI()
+    window = FakeWindow(events)
+    window.create_file_dialog = pick
+    robin._attach(window, None)
+    context = robin.get_state()["attachments"]["context"]
+    folder = robin.pick_chat_folder(context)["state"]["project_folder"]
+    result = robin.send_message("Leia fonte.py", [], context, folder["id"])
+    events.wait("onDone", result["gen_id"])
+    assert {tool["name"] for tool in packets[0]["tools"][0]["tools"]} == {
+        "listar_pasta", "ler_arquivo_da_pasta",
+    }
+    assert "MARCADOR-ARQUIVO-LOCAL" in repr(packets[1]["input"]) and str(project) not in repr(packets)
+    robin.remove_chat_folder(folder["id"])
+    result = robin.send_message("Diga olá")
+    events.wait("onDone", result["gen_id"])
+    assert "MARCADOR-ARQUIVO-LOCAL" not in repr(packets[2]["input"])

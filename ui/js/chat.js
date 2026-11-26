@@ -359,7 +359,7 @@ export function createChat({ composer, onModelChanged, onProviderChanged }) {
     latest?.classList.add("is-latest");
     if (!regenerationAllowed) {
       latest?.querySelector(".regenerate-btn")?.remove();
-      list.append(el("p", "message message__status", "Para usar os arquivos novamente, anexe-os em uma nova mensagem."));
+      list.append(el("p", "message message__status", "Selecione novamente os anexos ou a pasta e envie uma nova mensagem."));
     }
   }
 
@@ -484,11 +484,11 @@ export function createChat({ composer, onModelChanged, onProviderChanged }) {
     return result;
   }
 
-  async function send(text, files = [], context = "") {
+  async function send(text, files = [], context = "", folderId = "") {
     if (generating) return;
     if (clearing) {
       await clearing;
-      if (files.length) return; // anexos de outra conversa não acompanham a troca de contexto
+      if (files.length || folderId) return;
     }
     if (generating) return;
     empty.hidden = true;
@@ -497,7 +497,7 @@ export function createChat({ composer, onModelChanged, onProviderChanged }) {
     composer.clear();
 
     const payload = files.map(({ name, content }) => ({ name, content }));
-    const result = await startGeneration(() => call("send_message", text, payload, context));
+    const result = await startGeneration(() => call("send_message", text, payload, context, folderId));
     if (result?.ok) {
       regenerationAllowed = true;
       return;
@@ -505,6 +505,10 @@ export function createChat({ composer, onModelChanged, onProviderChanged }) {
 
     userMessage.remove();
     composer.restoreDraft(text, result?.code === "attachment_context" ? [] : files, context);
+    if (result?.code === "folder_context") {
+      const state = await call("get_state").catch(() => null);
+      if (state && !clearing) onProviderChanged?.(state);
+    }
     appendError(result || {}, false);
   }
 

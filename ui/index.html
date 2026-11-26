@@ -284,12 +284,15 @@
             <svg class="icon"><use href="#i-arrow-down" /></svg>
           </button>
           <form class="composer" id="composer" autocomplete="off">
-            <ul class="composer__attachments file-chips" id="composer-attachments" aria-label="Arquivos selecionados" hidden></ul>
+            <ul class="composer__attachments file-chips" id="composer-attachments" aria-label="Arquivos e pasta selecionados" hidden></ul>
             <input id="composer-file-input" type="file" multiple hidden>
             <textarea class="composer__input" id="composer-input" rows="1" placeholder="Pergunte ao Robin" aria-label="Mensagem"></textarea>
             <div class="composer__row">
               <button class="icon-btn icon-btn--sm" id="attach-button" type="button" aria-label="Anexar arquivos" title="Anexar arquivos">
                 <svg class="icon icon--sm" aria-hidden="true"><use href="#i-paperclip" /></svg>
+              </button>
+              <button class="icon-btn icon-btn--sm" id="folder-button" type="button" aria-label="Abrir pasta para leitura" title="Abrir pasta para leitura" hidden>
+                <svg class="icon icon--sm" aria-hidden="true"><use href="#i-folder" /></svg>
               </button>
               <span class="composer__hint"><kbd>Enter</kbd> envia <kbd>Shift Enter</kbd> quebra linha</span>
               <span class="composer__count" id="composer-count" hidden></span>

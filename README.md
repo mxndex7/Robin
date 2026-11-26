@@ -132,6 +132,14 @@ Use o clipe junto ao campo de mensagem para selecionar até quatro arquivos de t
 
 Ao enviar, o provedor ativo recebe o conteúdo dos arquivos. O histórico guarda os nomes, a mensagem e a resposta. Os arquivos originais continuam onde estavam. O conteúdo anexado fica disponível como contexto enquanto a conversa está aberta. Durante essa consulta, o modelo pode usar a memória já presente no contexto. As ferramentas de busca e edição da memória ficam suspensas enquanto o conteúdo dos anexos estiver disponível. Para gravar na memória pelo chat, inicie uma conversa sem anexos. Para usá-lo novamente depois de reabrir a conversa, anexe o arquivo em uma nova mensagem. Trechos incluídos na resposta entram no histórico da conversa e seguem as regras de sincronização do provedor.
 
+### Consultar uma pasta no chat
+
+Use o ícone de pasta ao lado do clipe, escolha uma pasta local e escreva o que quer investigar. O ChatGPT ou o Gemini ativo pode listar subpastas e consultar trechos de código e arquivos UTF-8 dentro da pasta escolhida. A operação é somente leitura. Links do sistema de arquivos, arquivos ocultos, pastas de dados do Robin e alguns nomes comuns de arquivos privados são excluídos. Escolha uma pasta adequada para compartilhar com o provedor, pois arquivos de código também podem conter dados sensíveis.
+
+Por mensagem, a leitura fica limitada a 12 arquivos, até 16 KB por arquivo e 64 KB no total. Arquivos acima de 32 KB ficam indisponíveis. Durante essa consulta, as ferramentas de memória ficam suspensas. Remova a pasta pelo campo de mensagem. Escolha a pasta de novo se trocar de conversa, reabrir o histórico ou mudar de provedor.
+
+O provedor recebe os nomes listados e os trechos consultados. O Robin guarda a mensagem e a resposta no histórico. Se a resposta citar um trecho, ele segue as regras de armazenamento e sincronização da conversa.
+
 ### Conversas
 
 Toda conversa fica guardada neste PC, em `conversas\`, um arquivo por conversa: a mensagem na hora de enviar e a resposta no fim (com as ações, parada ou erro; regenerar troca a última resposta).

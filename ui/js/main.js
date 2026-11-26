@@ -82,7 +82,7 @@ function wireConversations(chat, composer) {
 
   /** Nova conversa (Ctrl+L, cabeçalho, lateral): a atual continua guardada, sem confirmação. */
   return async function startNew() {
-    if (chat.hasMessages || current) await chat.newConversation();
+    if (chat.hasMessages || current || composer.hasFolder) await chat.newConversation();
     composer.focus();
   };
 }
@@ -102,9 +102,14 @@ async function init() {
   sidebar.setCloud(state.cloud);
 
   const composer = createComposer({
-    onSubmit: (text, files, context) => chat.send(text, files, context),
+    onSubmit: (text, files, context, folderId) => chat.send(text, files, context, folderId),
     onStop: () => chat.stop(),
     limits: state.attachments,
+    changeFolder: async (context, removeId, isCurrent) => {
+      const result = removeId ? await call("remove_chat_folder", removeId) : await call("pick_chat_folder", context);
+      if (result?.ok && isCurrent()) applyProvider(result.state);
+      return result;
+    },
   });
   const modelPicker = createModelPicker();
   let chat;
@@ -112,6 +117,7 @@ async function init() {
     if (!next) return;
     if (next.model) modelPicker.setProvider(next.provider, next.model);
     composer.setAttachmentContext(next.attachments?.context);
+    composer.setFolder(next.project_folder, next.folder_picker);
     if (next.can_regenerate !== undefined) chat?.setCanRegenerate(next.can_regenerate);
     $("#key-notice").hidden = next.has_key;
   }

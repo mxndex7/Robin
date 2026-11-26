@@ -92,7 +92,7 @@ class _ResponsesChat:
                 for group in config.tools for tool in group.function_declarations or []
             ]
             body["tools"] = [{"type": "namespace", "name": MEMORY_NAMESPACE,
-                              "description": "Consultar e atualizar a memória local do Robin.", "tools": functions}]
+                              "description": "Ferramentas disponíveis para o turno no Robin.", "tools": functions}]
         access = self._account.token(expected_profile=self._profile)
         with httpx.stream("POST", RESOURCE + "/responses", json=body, timeout=60,
                           headers={"Authorization": f"Bearer {access}"}) as response:
@@ -175,7 +175,7 @@ class ChatGPTService(GeminiService):
     def _make_client(self, _api_key):
         return _ResponsesClient(self._account)
 
-    def _stream_error(self, error, model):
+    def _stream_error(self, error, model, *, private=False):
         if isinstance(error, GeminiError):
             return error
         if isinstance(error, ChatGPTAuthError):

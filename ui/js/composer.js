@@ -6,7 +6,7 @@ import { toast } from "./toast.js";
 
 const COUNT_FROM = 500;
 
-export function createComposer({ onSubmit, onStop, limits }) {
+export function createComposer({ onSubmit, onStop, limits, changeFolder }) {
   const form = document.getElementById("composer");
   const input = document.getElementById("composer-input");
   const button = document.getElementById("send-button");
@@ -14,6 +14,7 @@ export function createComposer({ onSubmit, onStop, limits }) {
 
   const fileInput = document.getElementById("composer-file-input");
   const attachButton = document.getElementById("attach-button");
+  const folderButton = document.getElementById("folder-button");
   const attachmentList = document.getElementById("composer-attachments");
   // A opção "Todos os arquivos" do seletor permite escolher Dockerfile, Makefile e outros nomes sem extensão.
   if (limits) fileInput.accept = limits.extensions.join(",");
@@ -25,29 +26,61 @@ export function createComposer({ onSubmit, onStop, limits }) {
   let attachments = [];
   let context = limits?.context;
   let pickerContext = null;
+  let folder = null;
+  let folderBusy = false;
+  let folderRemove = null;
+
+  function chip(text, removeLabel, removeEntry) {
+    const item = document.createElement("li");
+    item.className = "file-chip";
+    const name = document.createElement("span");
+    name.className = "file-chip__name";
+    name.textContent = name.title = text;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "icon-btn icon-btn--sm";
+    remove.setAttribute("aria-label", removeLabel);
+    remove.append(icon("x", "icon icon--sm"));
+    remove.addEventListener("click", removeEntry);
+    item.append(name, remove);
+    return { item, remove };
+  }
 
   function renderAttachments() {
-    attachmentList.hidden = !attachments.length;
-    attachmentList.replaceChildren(...attachments.map((file, index) => {
-      const chip = document.createElement("li");
-      chip.className = "file-chip";
-      const name = document.createElement("span");
-      name.className = "file-chip__name";
-      name.textContent = name.title = file.name;
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "icon-btn icon-btn--sm";
-      remove.setAttribute("aria-label", `Remover ${file.name}`);
-      remove.append(icon("x", "icon icon--sm"));
-      remove.addEventListener("click", () => {
-        attachments = attachments.filter((_, i) => i !== index);
-        renderAttachments();
-        update();
-        input.focus();
-      });
-      chip.append(name, remove);
-      return chip;
-    }));
+    const items = attachments.map((file, index) => chip(file.name, `Remover ${file.name}`, () => {
+      attachments = attachments.filter((_, i) => i !== index);
+      renderAttachments();
+      update();
+      input.focus();
+    }).item);
+    folderRemove = null;
+    if (folder) {
+      const { item, remove } = chip(`${folder.name} · Somente leitura`, "Remover pasta", () => selectFolder(folder.id));
+      item.title = "O provedor ativo recebe os trechos consultados dentro desta pasta.";
+      folderRemove = remove;
+      items.unshift(item);
+    }
+    attachmentList.hidden = !items.length;
+    attachmentList.replaceChildren(...items);
+  }
+
+  async function selectFolder(removeId = "") {
+    if (folderBusy || generating) return;
+    folderBusy = true;
+    const previousContext = context;
+    update();
+    try {
+      const result = await changeFolder(previousContext, removeId, () => previousContext === context);
+      if (!result?.ok && previousContext === context) {
+        toast(result?.error || "Não foi possível atualizar a pasta desta conversa.", { tone: "error" });
+      }
+    } catch {
+      if (previousContext === context) toast("Não foi possível atualizar a pasta desta conversa.", { tone: "error" });
+    } finally {
+      folderBusy = false;
+      update();
+      input.focus();
+    }
   }
 
   function clearFiles() {
@@ -63,6 +96,7 @@ export function createComposer({ onSubmit, onStop, limits }) {
     pickerContext = context;
     fileInput.click();
   });
+  folderButton.addEventListener("click", () => selectFolder());
   fileInput.addEventListener("cancel", () => {
     pickerContext = null;
   });
@@ -127,8 +161,10 @@ export function createComposer({ onSubmit, onStop, limits }) {
 
   function update() {
     const length = input.value.length;
-    button.disabled = !generating && (reading || (!attachments.length && input.value.trim() === ""));
-    attachButton.disabled = reading || generating;
+    button.disabled = !generating && (reading || folderBusy || (!attachments.length && input.value.trim() === ""));
+    attachButton.disabled = reading || folderBusy || generating;
+    folderButton.disabled = reading || folderBusy || generating;
+    if (folderRemove) folderRemove.disabled = folderBusy || generating;
     count.hidden = length < COUNT_FROM;
     count.textContent = `${length.toLocaleString("pt-BR")} caracteres`;
   }
@@ -139,8 +175,8 @@ export function createComposer({ onSubmit, onStop, limits }) {
       return;
     }
     const text = input.value.trim();
-    if (reading || (!text && !attachments.length)) return;
-    onSubmit?.(text, [...attachments], context);
+    if (reading || folderBusy || (!text && !attachments.length)) return;
+    onSubmit?.(text, [...attachments], context, folder?.id || "");
   }
 
   input.addEventListener("input", () => {
@@ -163,6 +199,9 @@ export function createComposer({ onSubmit, onStop, limits }) {
   update();
 
   return {
+    get hasFolder() {
+      return Boolean(folder);
+    },
     focus() {
       input.focus();
     },
@@ -186,6 +225,13 @@ export function createComposer({ onSubmit, onStop, limits }) {
         clearFiles();
         toast("A conversa ou o provedor mudou. Selecione os arquivos novamente.");
       }
+    },
+    setFolder(value, available) {
+      folderButton.hidden = !available;
+      if (folder?.id === value?.id) return;
+      folder = value;
+      renderAttachments();
+      update();
     },
     restoreDraft(text, files, previousContext) {
       input.value = input.value ? [text, input.value].filter(Boolean).join("\n\n") : text;
